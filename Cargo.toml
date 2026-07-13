@@ -10,6 +10,12 @@ rust-version = "1.77"
 name = "esp32-s3-hello"
 harness = false         # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
+# OTA 救援固件(独立 bin,烧到 ota_0 槽):连 WiFi → 起 HTTP server → 接收新主固件写入 ota_1。
+[[bin]]
+name = "ota"
+path = "src/ota.rs"
+harness = false
+
 [profile.release]
 opt-level = "s"
 

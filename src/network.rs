@@ -5,7 +5,7 @@ use esp_idf_svc::{
 };
 use log::info;
 
-use crate::ble_provision::{pick_cred, WifiCred};
+use crate::setting::{pick_cred, WifiCred};
 
 /// 以 STA 连接:扫描周围 WiFi,从 `wifi_list` 里挑第一个在范围内的(顺序=优先级)连上。
 pub fn wifi_connect(

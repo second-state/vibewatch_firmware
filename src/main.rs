@@ -8,6 +8,7 @@ mod network;
 mod new_jpg;
 mod protocol;
 mod remote;
+mod setting;
 mod ui;
 
 const DEFAULT_SNTP_SERVERS: [&str; 4] = [
@@ -21,12 +22,18 @@ fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
+    // A/B 双槽 OTA:标记当前启动槽为有效(确认本次正常启动;配合回滚机制)。
+    {
+        let mut ota = esp_idf_svc::ota::EspOta::new()?;
+        ota.mark_running_slot_valid()?;
+    }
+
     let peripherals = esp_idf_svc::hal::peripherals::Peripherals::take().unwrap();
     let sysloop = EspSystemEventLoop::take()?;
     let _fs = esp_idf_svc::io::vfs::MountedEventfs::mount(20)?;
     let partition = esp_idf_svc::nvs::EspDefaultNvsPartition::take()?;
     let nvs = esp_idf_svc::nvs::EspDefaultNvs::new(partition, "setting", true)?;
-    let setting = ble_provision::Setting::load_from_nvs(&nvs)?;
+    let setting = setting::Setting::load_from_nvs(&nvs)?;
 
     // === LCD: I2C 扩展 IO 复位 SPD2010 + QSPI + 背光 ===
     let mut i2c = exio::i2c_init(
@@ -137,4 +144,16 @@ fn wifi_sta_mac_client_id() -> String {
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
         )
     }
+}
+
+/// 切到另一个 OTA 槽并重启:设置页选「OTA Update」后调用 → 进救援固件(ota_0)。
+/// 触发入口待接触屏后接入(与 session 选择共用输入层);现在先就位,未接线故 allow(dead_code)。
+#[allow(dead_code)]
+pub(crate) fn goto_next_firmware() -> anyhow::Result<()> {
+    use esp_idf_svc::sys::{esp_ota_get_next_update_partition, esp_ota_set_boot_partition};
+    unsafe {
+        let partition = esp_ota_get_next_update_partition(std::ptr::null());
+        esp_idf_svc::sys::esp!(esp_ota_set_boot_partition(partition))?;
+    }
+    esp_idf_svc::hal::reset::restart();
 }

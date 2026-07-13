@@ -16,82 +16,12 @@ use esp32_nimble::{
 use esp_idf_svc::nvs::EspDefaultNvs;
 use serde::{Deserialize, Serialize};
 
+// WifiCred / Setting / NVS 存储已抽到 crate::setting(无 BLE 依赖,OTA 救援固件共用)。
+use crate::setting::{Setting, WifiCred, MAX_WIFI_CREDS};
+
 pub const SERVICE_ID: BleUuid = uuid128!("623fa3e2-631b-4f8f-a6e7-a7b09c03e7e0");
 const CONFIG_ID: BleUuid = uuid128!("cef520a9-bcb5-4fc6-87f7-82804eee2b20");
 const RESET_ID: BleUuid = uuid128!("f0e1d2c3-b4a5-6789-0abc-def123456789");
-
-/// NVS key:整份 wifi_list 作为一个 JSON 字符串存。
-pub const WIFI_LIST_KEY: &str = "wifi_list";
-/// NVS 单值 ~4KB 限额内最多保存的 WiFi 数。
-pub const MAX_WIFI_CREDS: usize = 8;
-
-/// 单条 WiFi 凭据。顺序即连接优先级。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WifiCred {
-    pub ssid: String,
-    pub pass: String,
-}
-
-/// 在已配置凭据里挑第一个出现在扫描结果中的(顺序即优先级)。
-pub fn pick_cred<'a>(scan_list: &[String], creds: &'a [WifiCred]) -> Option<&'a WifiCred> {
-    creds
-        .iter()
-        .find(|c| scan_list.iter().any(|s| s == &c.ssid))
-}
-
-#[derive(Debug, Clone)]
-pub struct Setting {
-    pub wifi_list: Vec<WifiCred>,
-    pub server_url: String,
-}
-
-impl Setting {
-    pub fn save_wifi_list(nvs: &mut EspDefaultNvs, list: &[WifiCred]) -> anyhow::Result<()> {
-        let json = serde_json::to_string(list)?;
-        nvs.set_str(WIFI_LIST_KEY, &json)?;
-        Ok(())
-    }
-
-    pub fn clear_nvs(nvs: &mut EspDefaultNvs) -> anyhow::Result<()> {
-        nvs.remove(WIFI_LIST_KEY)?;
-        nvs.remove("server_url")?;
-        Ok(())
-    }
-
-    pub fn load_from_nvs(nvs: &EspDefaultNvs) -> anyhow::Result<Self> {
-        let mut json_buf = [0u8; 4096];
-        let wifi_list = nvs
-            .get_str(WIFI_LIST_KEY, &mut json_buf)
-            .ok()
-            .flatten()
-            .and_then(|s| match serde_json::from_str::<Vec<WifiCred>>(s) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    log::error!("Failed to parse wifi_list JSON: {:?}", e);
-                    None
-                }
-            })
-            .unwrap_or_default();
-        log::info!("Loaded {} wifi creds from NVS", wifi_list.len());
-
-        let mut url_buf = [0u8; 128];
-        let server_url = nvs
-            .get_str("server_url", &mut url_buf)
-            .ok()
-            .flatten()
-            .unwrap_or("")
-            .to_string();
-
-        Ok(Setting {
-            wifi_list,
-            server_url,
-        })
-    }
-
-    pub fn need_init(&self) -> bool {
-        self.wifi_list.is_empty() || self.server_url.is_empty()
-    }
-}
 
 /// CONFIG 写载荷:部分配置,缺失字段保持原状。
 #[derive(Debug, Deserialize)]
