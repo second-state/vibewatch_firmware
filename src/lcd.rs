@@ -1,5 +1,13 @@
 use esp_idf_svc::hal::{self, ledc::LedcDriver};
 
+// hello.c 提供的本地函数(QSPI LCD 初始化 + 全局 panel handle)。
+// esp-idf-sys 0.37 不再为 component_dirs 本地组件自动生成 bindings,这里手动 extern "C";
+// hello.c 仍由 `component_dirs = ["components"]` 编译进固件,链接时符号可用。
+extern "C" {
+    fn QSPI_Init() -> std::ffi::c_int;
+    fn get_panel_handle() -> esp_idf_svc::sys::esp_lcd_panel_handle_t;
+}
+
 pub fn spd2010_reset(i2c: &mut esp_idf_svc::hal::i2c::I2cDriver<'static>) -> anyhow::Result<()> {
     super::exio::set_exio(i2c, super::exio::ExioPin::Exio2, false)?;
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -8,15 +16,18 @@ pub fn spd2010_reset(i2c: &mut esp_idf_svc::hal::i2c::I2cDriver<'static>) -> any
     Ok(())
 }
 
-pub fn backlight_init(bl_pin: hal::gpio::AnyIOPin) -> anyhow::Result<LedcDriver<'static>> {
+pub fn backlight_init(bl_pin: hal::gpio::AnyIOPin<'static>) -> anyhow::Result<LedcDriver<'static>> {
     let config = hal::ledc::config::TimerConfig::new()
         .resolution(hal::ledc::Resolution::Bits13)
         .frequency(hal::units::Hertz(5000));
-    let time = unsafe { hal::ledc::TIMER0::new() };
+    let time = unsafe { hal::ledc::TIMER0::steal() };
     let timer_driver = hal::ledc::LedcTimerDriver::new(time, &config)?;
 
-    let ledc_driver =
-        hal::ledc::LedcDriver::new(unsafe { hal::ledc::CHANNEL0::new() }, timer_driver, bl_pin)?;
+    let ledc_driver = hal::ledc::LedcDriver::new(
+        unsafe { hal::ledc::CHANNEL0::steal() },
+        timer_driver,
+        bl_pin,
+    )?;
 
     Ok(ledc_driver)
 }
@@ -36,10 +47,10 @@ pub fn set_backlight<'d>(
 
 pub fn qspi_init() {
     unsafe {
-        if esp_idf_svc::sys::hello::QSPI_Init() == 0 {
+        if QSPI_Init() == 0 {
             panic!("QSPI_Init failed");
         }
-        let panel = std::mem::transmute(esp_idf_svc::sys::hello::get_panel_handle());
+        let panel = get_panel_handle();
         clear_draw_bitmap(panel);
     }
 }
@@ -66,7 +77,7 @@ pub fn clear_draw_bitmap(panel: esp_idf_svc::sys::esp_lcd_panel_handle_t) {
 
 pub fn flush_display(color_data: &[u8], x_start: i32, y_start: i32, x_end: i32, y_end: i32) -> i32 {
     unsafe {
-        let panel = std::mem::transmute(esp_idf_svc::sys::hello::get_panel_handle());
+        let panel = get_panel_handle();
         let e = esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
             panel,
             x_start,

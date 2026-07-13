@@ -22,7 +22,11 @@ const TCA9554_OUTPUT_REG: u8 = 0x01;
 const TCA9554_POLARITY_REG: u8 = 0x02;
 const TCA9554_CONFIG_REG: u8 = 0x03;
 
-pub fn i2c_init(i2c: I2C0, sda: Gpio11, scl: Gpio10) -> anyhow::Result<I2cDriver<'static>> {
+pub fn i2c_init(
+    i2c: I2C0<'static>,
+    sda: Gpio11<'static>,
+    scl: Gpio10<'static>,
+) -> anyhow::Result<I2cDriver<'static>> {
     const I2C_MASTER_FREQ_HZ: u32 = 400000;
     let config = esp_idf_svc::hal::i2c::config::Config::new()
         .scl_enable_pullup(true)

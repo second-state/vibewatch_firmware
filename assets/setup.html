@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Watch Setup</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            max-width: 480px;
+            margin: 20px auto;
+            padding: 0 16px;
+        }
+
+        h2 {
+            margin-bottom: 4px;
+        }
+
+        .hint {
+            color: #666;
+            font-size: 13px;
+            margin: 0 0 16px;
+        }
+
+        label {
+            display: block;
+            margin: 12px 0 4px;
+        }
+
+        input {
+            width: 100%;
+            padding: 9px;
+            font-size: 16px;
+            box-sizing: border-box;
+        }
+
+        .wifi-row {
+            display: flex;
+            gap: 6px;
+            margin: 6px 0;
+        }
+
+        .wifi-row input.ssid {
+            flex: 3;
+        }
+
+        .wifi-row input.pass {
+            flex: 3;
+        }
+
+        .wifi-row button {
+            flex: 0 0 auto;
+            padding: 9px 12px;
+            background: #eee;
+            border: 0;
+            border-radius: 6px;
+        }
+
+        #add {
+            margin: 6px 0;
+            padding: 8px 12px;
+            background: #eee;
+            border: 0;
+            border-radius: 6px;
+        }
+
+        button#go {
+            margin-top: 22px;
+            padding: 13px;
+            width: 100%;
+            font-size: 16px;
+            background: #0a7;
+            color: #fff;
+            border: 0;
+            border-radius: 8px;
+        }
+
+        button#go:disabled {
+            background: #999;
+        }
+
+        #log {
+            margin-top: 20px;
+            white-space: pre-wrap;
+            font-family: ui-monospace, monospace;
+            font-size: 13px;
+            background: #f4f4f4;
+            padding: 10px;
+            border-radius: 8px;
+            min-height: 20px;
+        }
+    </style>
+</head>
+
+<body>
+    <h2>Watch Setup</h2>
+    <p class="hint">手机用 Chrome / Edge / Bluefy 打开本页,按优先级填好 WiFi 列表 + MQTT broker,点连接,手表会自动重启联网。</p>
+
+    <label>WiFi 列表(顺序 = 连接优先级)</label>
+    <div id="wifis"></div>
+    <button id="add" type="button">+ Add WiFi</button>
+
+    <label>MQTT broker</label>
+    <input id="url" type="text" placeholder="mqtt://192.168.1.10:1883">
+
+    <button id="go">Connect &amp; Save</button>
+    <div id="log"></div>
+
+    <script>
+        // 与固件 src/ble_provision.rs 保持一致
+        const SERVICE_ID = "623fa3e2-631b-4f8f-a6e7-a7b09c03e7e0";
+        const CONFIG_ID  = "cef520a9-bcb5-4fc6-87f7-82804eee2b20";
+        const RESET_ID   = "f0e1d2c3-b4a5-6789-0abc-def123456789";
+
+        const logEl = document.getElementById('log');
+        const log = (...a) => { logEl.textContent += a.join(' ') + '\n'; };
+        const wifisEl = document.getElementById('wifis');
+
+        function addRow(ssid = '', pass = '') {
+            const row = document.createElement('div');
+            row.className = 'wifi-row';
+            row.innerHTML =
+                `<input class="ssid" type="text" placeholder="SSID" value="${ssid.replace(/"/g, '&quot;')}">` +
+                `<input class="pass" type="password" placeholder="password" value="${pass.replace(/"/g, '&quot;')}">` +
+                `<button type="button" class="del">x</button>`;
+            row.querySelector('.del').onclick = () => row.remove();
+            wifisEl.appendChild(row);
+        }
+
+        addRow();
+        document.getElementById('add').onclick = () => addRow();
+
+        document.getElementById('go').onclick = async () => {
+            const btn = document.getElementById('go');
+            btn.disabled = true;
+            logEl.textContent = '';
+            try {
+                const wifi_list = [...wifisEl.querySelectorAll('.wifi-row')]
+                    .map(r => ({
+                        ssid: r.querySelector('.ssid').value.trim(),
+                        pass: r.querySelector('.pass').value,
+                    }))
+                    .filter(c => c.ssid);
+                const server_url = document.getElementById('url').value.trim();
+
+                if (wifi_list.length === 0) { log('Add at least one WiFi.'); return; }
+                if (!server_url) { log('MQTT broker is empty.'); return; }
+
+                log('Selecting BLE device...');
+                const device = await navigator.bluetooth.requestDevice({
+                    filters: [{ services: [SERVICE_ID] }],
+                });
+                log('Connecting to ' + device.name + ' ...');
+                const server = await device.gatt.connect();
+                const service = await server.getPrimaryService(SERVICE_ID);
+
+                const payload = new TextEncoder().encode(JSON.stringify({ wifi_list, server_url }));
+
+                log('Writing config...');
+                const cfg = await service.getCharacteristic(CONFIG_ID);
+                await cfg.writeValue(payload);
+                log('Config saved. Sending RESET...');
+
+                const rst = await service.getCharacteristic(RESET_ID);
+                await rst.writeValue(new TextEncoder().encode('RESET'));
+                log('Done. Watch will restart and connect.');
+            } catch (e) {
+                log('ERROR: ' + (e && e.message ? e.message : e));
+            } finally {
+                btn.disabled = false;
+            }
+        };
+    </script>
+</body>
+
+</html>

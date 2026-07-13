@@ -270,4 +270,74 @@ impl UI {
         }
         Ok(())
     }
+
+    /// 渲染 vibetty 会话列表:标题 + 每行一个会话标签(焦点行蓝底)。
+    /// `items` = (标签, is_working);`focus` = 焦点行。整屏 flush。
+    pub fn display_session_list(
+        &mut self,
+        title: &str,
+        items: &[(String, bool)],
+        focus: usize,
+    ) -> anyhow::Result<()> {
+        let display = self.display.as_mut();
+        display.clear(ColorFormat::WHITE)?;
+
+        Text::with_alignment(
+            title,
+            Point::new(8, 18),
+            U8g2TextStyle::new(
+                u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
+                ColorFormat::CSS_DARK_BLUE,
+            ),
+            Alignment::Left,
+        )
+        .draw(display)?;
+
+        let item_h: i32 = 22;
+        let start_y: i32 = 30;
+        for (i, (label, is_working)) in items.iter().enumerate() {
+            let y = start_y + (i as i32) * item_h;
+            if y + item_h > DISPLAY_HEIGHT as i32 {
+                break;
+            }
+            if i == focus {
+                Rectangle::new(
+                    Point::new(0, y - 17),
+                    Size::new(DISPLAY_WIDTH as u32, item_h as u32),
+                )
+                .into_styled(
+                    PrimitiveStyleBuilder::new()
+                        .fill_color(ColorFormat::CSS_DARK_BLUE)
+                        .stroke_color(ColorFormat::CSS_DARK_BLUE)
+                        .stroke_width(1)
+                        .build(),
+                )
+                .draw(display)?;
+            }
+            let color = if *is_working {
+                ColorFormat::CSS_WHITE
+            } else {
+                ColorFormat::CSS_DARK_ORANGE
+            };
+            Text::with_alignment(
+                label,
+                Point::new(10, y),
+                U8g2TextStyle::new(u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312, color),
+                Alignment::Left,
+            )
+            .draw(display)?;
+        }
+
+        let e = crate::lcd::flush_display(
+            self.display.data(),
+            0,
+            0,
+            DISPLAY_WIDTH as i32,
+            DISPLAY_HEIGHT as i32,
+        );
+        if e != 0 {
+            log::warn!("flush session list error: {e}");
+        }
+        Ok(())
+    }
 }

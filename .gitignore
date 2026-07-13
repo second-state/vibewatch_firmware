@@ -3,12 +3,7 @@
 /target
 /Cargo.lock
 
+# runtime logs (may contain secrets)
+*.log
+
 bjws458761603*
-
-components/wake/*
-!components/wake/CMakeLists.txt
-!components/wake/wrapper.cpp
-!components/wake/wrapper.h
-
-components/wake_ht
-components/wake_gaia_0
