@@ -7,16 +7,11 @@ pub const SAMPLE_RATE: u32 = 16000;
 extern "C" {
     fn board_audio_init() -> std::ffi::c_int;
     fn board_audio_read_mic(data: *mut std::ffi::c_void, len: std::ffi::c_int) -> std::ffi::c_int;
-    fn board_audio_sample_rate() -> std::ffi::c_int;
 }
 
 pub fn init() -> anyhow::Result<()> {
     let code = unsafe { board_audio_init() };
     esp_result("board_audio_init", code)
-}
-
-pub fn sample_rate_hz() -> u32 {
-    unsafe { board_audio_sample_rate() as u32 }
 }
 
 pub fn read_mic_i16(samples: &mut [i16]) -> anyhow::Result<usize> {
