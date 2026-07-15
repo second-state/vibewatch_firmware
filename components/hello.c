@@ -70,7 +70,7 @@ int board_display_set_brightness(uint8_t percent)
     return bsp_display_brightness_set(percent);
 }
 
-int board_touch_init(void)
+int board_touch_init(esp_lcd_touch_interrupt_callback_t callback)
 {
     if (touch_handle != NULL) {
         return ESP_OK;
@@ -79,8 +79,18 @@ int board_touch_init(void)
     esp_err_t err = bsp_touch_new(NULL, &touch_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "bsp_touch_new failed: %s", esp_err_to_name(err));
+        return err;
     }
-    return err;
+
+    if (callback != NULL) {
+        err = esp_lcd_touch_register_interrupt_callback(touch_handle, callback);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "register touch interrupt callback failed: %s", esp_err_to_name(err));
+            return err;
+        }
+    }
+
+    return ESP_OK;
 }
 
 static esp_err_t pmu_read_reg(uint8_t reg, uint8_t *data)
@@ -188,6 +198,9 @@ bool board_touch_read(uint16_t *x, uint16_t *y, uint16_t *strength)
 
     esp_err_t err = esp_lcd_touch_read_data(touch_handle);
     if (err != ESP_OK) {
+        if (err == ESP_ERR_INVALID_STATE) {
+            return false;
+        }
         ESP_LOGW(TAG, "esp_lcd_touch_read_data failed: %s", esp_err_to_name(err));
         return false;
     }

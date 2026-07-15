@@ -14,6 +14,7 @@ pub async fn run(
     uri: String,
     client_id: String,
     gui: &mut UI,
+    mut touch_rx: tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
     asr_tx: std::sync::mpsc::Sender<audio::AsrRequest>,
     asr_config: Option<&audio::AsrConfig>,
 ) -> anyhow::Result<()> {
@@ -32,7 +33,7 @@ pub async fn run(
     log::info!("MQTT connected, entering session list");
 
     // session list:触摸选择会话。
-    open_session_picker(&mut server, gui).await?;
+    open_session_picker(&mut server, gui, &mut touch_rx).await?;
 
     // 选定会话后:主循环,解码并刷屏
     loop {
@@ -40,9 +41,16 @@ pub async fn run(
         server.flush_pending().await?;
 
         tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                if asr_touch_pressed() {
-                    run_touch_asr(&mut server, gui, &asr_tx, asr_config).await?;
+            event = touch_rx.recv() => {
+                match event {
+                    Some(lcd::TouchEvent::Press(touch)) if is_asr_touch(touch) => {
+                        run_touch_asr(&mut server, gui, &mut touch_rx, &asr_tx, asr_config).await?;
+                    }
+                    Some(_) => {}
+                    None => {
+                        log::warn!("Touch event source closed, exiting remote loop");
+                        break;
+                    }
                 }
                 continue;
             }
@@ -94,6 +102,7 @@ async fn handle_mqtt_event(ev: MqttEvent) -> anyhow::Result<()> {
 async fn run_touch_asr(
     server: &mut MqttServer,
     gui: &mut UI,
+    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
     asr_tx: &std::sync::mpsc::Sender<audio::AsrRequest>,
     asr_config: Option<&audio::AsrConfig>,
 ) -> anyhow::Result<()> {
@@ -101,7 +110,7 @@ async fn run_touch_asr(
         gui.state = "ASR not configured".to_string();
         gui.text = "Set asr_config over BLE".to_string();
         let _ = gui.display_flush();
-        wait_touch_release().await;
+        wait_touch_release(touch_rx).await;
         return Ok(());
     };
 
@@ -130,8 +139,8 @@ async fn run_touch_asr(
             response = &mut result => {
                 break response.unwrap_or_else(|_| Err(anyhow::anyhow!("ASR worker dropped request")));
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                if !asr_touch_pressed() {
+            event = touch_rx.recv() => {
+                if !update_asr_touch_pressed(event) {
                     cancel.store(true, Ordering::Relaxed);
                 }
             }
@@ -169,24 +178,37 @@ async fn run_touch_asr(
     Ok(())
 }
 
-fn asr_touch_pressed() -> bool {
-    let Some(touch) = lcd::read_touch() else {
-        return false;
-    };
+fn update_asr_touch_pressed(event: Option<lcd::TouchEvent>) -> bool {
+    match event {
+        Some(lcd::TouchEvent::Press(touch)) => is_asr_touch(touch),
+        Some(lcd::TouchEvent::Release) | None => false,
+    }
+}
+
+fn is_asr_touch(touch: lcd::TouchPoint) -> bool {
     touch.y > lcd::LCD_HEIGHT.saturating_sub(80)
 }
 
-async fn wait_touch_release() {
-    for _ in 0..20 {
-        if !asr_touch_pressed() {
-            break;
+async fn wait_touch_release(touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>) {
+    let mut pressed = true;
+    while pressed {
+        tokio::select! {
+            event = touch_rx.recv() => {
+                pressed = update_asr_touch_pressed(event);
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                break;
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 
 /// 会话选择器:显示 vibetty 会话列表,触摸行选定。
-async fn open_session_picker(server: &mut MqttServer, gui: &mut UI) -> anyhow::Result<()> {
+async fn open_session_picker(
+    server: &mut MqttServer,
+    gui: &mut UI,
+    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+) -> anyhow::Result<()> {
     // 入口:retained presence 在 subscribe 后很快到达,但需 poll recv 才进 sessions 表。
     // 最多等 1500ms 让它们落地。
     if server.session_labels().is_empty() {
@@ -220,11 +242,14 @@ async fn open_session_picker(server: &mut MqttServer, gui: &mut UI) -> anyhow::R
         }
 
         tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                if let Some(index) = touched_session_index(labels.len()) {
+            event = touch_rx.recv() => {
+                if let Some(index) = touched_session_event_index(event, labels.len()) {
                     let prefix = labels[index].0.clone();
                     server.set_active(&prefix);
                     server.send(protocol::ClientMessage::sync()).await?;
+                    return Ok(());
+                } else if touch_rx.is_closed() {
+                    log::warn!("Touch event source closed during session picker");
                     return Ok(());
                 }
             }
@@ -240,8 +265,14 @@ async fn open_session_picker(server: &mut MqttServer, gui: &mut UI) -> anyhow::R
     }
 }
 
-fn touched_session_index(len: usize) -> Option<usize> {
-    let touch = lcd::read_touch()?;
+fn touched_session_event_index(event: Option<lcd::TouchEvent>, len: usize) -> Option<usize> {
+    match event {
+        Some(lcd::TouchEvent::Press(touch)) => touched_session_index(touch, len),
+        _ => None,
+    }
+}
+
+fn touched_session_index(touch: lcd::TouchPoint, len: usize) -> Option<usize> {
     const ITEM_H: u16 = 22;
     const START_Y: u16 = 30;
     const TEXT_BASELINE_OFFSET: u16 = 17;

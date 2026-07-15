@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "esp_lcd_panel_vendor.h"
+#include "esp_lcd_touch.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,7 +13,7 @@ extern "C" {
 esp_lcd_panel_handle_t get_panel_handle(void);
 int board_display_init(void);
 int board_display_set_brightness(uint8_t percent);
-int board_touch_init(void);
+int board_touch_init(esp_lcd_touch_interrupt_callback_t callback);
 bool board_touch_read(uint16_t *x, uint16_t *y, uint16_t *strength);
 int board_pmu_init(void);
 bool board_pmu_take_pkey_long_press(void);

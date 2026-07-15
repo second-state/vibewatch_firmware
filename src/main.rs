@@ -38,9 +38,15 @@ fn main() -> anyhow::Result<()> {
     let setting = setting::Setting::load_from_nvs(&nvs)?;
     let asr_config = audio::AsrConfig::load_from_nvs(&nvs);
 
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
     // === LCD + touch: Waveshare ESP32-S3-Touch-AMOLED-2.06 BSP ===
     lcd::init()?;
     lcd::touch_init()?;
+    let (touch_tx, touch_rx) = tokio::sync::mpsc::channel::<lcd::TouchEvent>(16);
+    lcd::start_touch_worker(touch_tx)?;
     lcd::set_backlight(30)?;
     power::init()?;
     power::start_power_key_worker();
@@ -100,10 +106,6 @@ fn main() -> anyhow::Result<()> {
     gui.display_flush().ok();
 
     let client_id = wifi_sta_mac_client_id();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-
     let (asr_tx, asr_rx) = std::sync::mpsc::channel::<audio::AsrRequest>();
     if let Err(e) = std::thread::Builder::new()
         .name("asr-worker".to_string())
@@ -133,6 +135,7 @@ fn main() -> anyhow::Result<()> {
         setting.server_url,
         client_id,
         &mut gui,
+        touch_rx,
         asr_tx,
         asr_config.as_ref(),
     ));

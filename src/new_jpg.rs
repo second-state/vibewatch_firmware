@@ -100,10 +100,10 @@ pub fn esp_jpeg_decode_one_picture(data: &[u8]) -> anyhow::Result<JpegBufferu16>
 
         // Generate default configuration
         let mut config = jpeg_dec_config_t::default();
-        config.output_type = jpeg_pixel_format_t_JPEG_PIXEL_FORMAT_RGB565_LE;
+        config.output_type = jpeg_pixel_format_t_JPEG_PIXEL_FORMAT_RGB565_BE;
 
-        config.scale.height = crate::lcd::LCD_HEIGHT;
-        config.scale.width = crate::lcd::LCD_WIDTH;
+        config.clipper.height = 496;
+        config.clipper.width = 408;
 
         // Create jpeg_dec handle
         let decoder = JpegDecoder::open(&config)
