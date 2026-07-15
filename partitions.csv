@@ -1,9 +1,8 @@
-# Name,     Type, SubType, Offset,   Size,    Flags
-# A/B 双槽 OTA:ota_0=救援固件(线缆烧一次),ota_1=主固件(cargo run 默认烧 + OTA 无线更新)。
-# 主固件镜像实测 ~2.6MB(debug),release 更小;槽位给足余量。app 槽需 0x10000 对齐。
+# Name,     Type, SubType, Offset,   Size, Flags
+# Note: if you have increased the bootloader size, make sure to update the offsets to avoid overlap,,,,
 
-nvs,      data, nvs,     0x9000,    0x40000,
-phy_init, data, phy,     0x49000,   0x1000,
-otadata,  data, ota,     0x4A000,   0x2000,
-ota_0,    app,  ota_0,   0x50000,   0x300000,
-ota_1,    app,  ota_1,   0x350000,  0x700000,
+nvs,      data, nvs,     ,        2M,
+phy_init, data, phy,     ,        0x1000,
+otadata,  data, ota,     ,        0x2000,
+ota_0,    app,  ota_0,   ,        2M,
+ota_1,    app,  ota_1,   ,        6M,

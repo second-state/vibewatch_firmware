@@ -1,7 +1,9 @@
 /.vscode
 /.embuild
 /target
+/tmp/
 /Cargo.lock
+/*.bin
 
 # runtime logs (may contain secrets)
 *.log

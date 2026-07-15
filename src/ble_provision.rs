@@ -1,7 +1,8 @@
-//! BLE 配网(照 vibekeys `bt_wifi_mode` 裁剪:只保留 WiFi 列表 + MQTT broker,去掉键盘/ASR/壁纸)。
+//! BLE 配网(照 vibekeys `bt_wifi_mode` 裁剪:保留 WiFi 列表 + MQTT broker + ASR)。
 //!
 //! 协议(沿用 vibekeys 的 UUID,手机端 setup.html 可复用):
-//! - CONFIG 特征值(READ|WRITE):写 = JSON 部分更新 `{"wifi_list":[{ssid,pass}...], "server_url":...}`,
+//! - CONFIG 特征值(READ|WRITE):写 = JSON 部分更新
+//!   `{"wifi_list":[{ssid,pass}...], "server_url":..., "asr_config":...}`,
 //!   顺序即连接优先级;读 = 当前整份快照。
 //! - RESET 特征值(WRITE):写入 `b"RESET"` 触发重启应用配置。
 //!
@@ -28,13 +29,15 @@ const RESET_ID: BleUuid = uuid128!("f0e1d2c3-b4a5-6789-0abc-def123456789");
 struct ConfigPatch {
     wifi_list: Option<Vec<WifiCred>>,
     server_url: Option<String>,
+    asr_config: Option<serde_json::Value>,
 }
 
-/// CONFIG 读快照:整份 wifi_list + server_url。
+/// CONFIG 读快照:整份 wifi_list + server_url + asr_config。
 #[derive(Serialize)]
 struct ConfigSnapshot<'a> {
     wifi_list: &'a [WifiCred],
     server_url: &'a str,
+    asr_config: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -56,9 +59,12 @@ pub fn new_setting_service(
     ch.lock()
         .on_read(move |c, _| {
             let s = setting_r.lock().unwrap();
+            let asr_config = crate::audio::AsrConfig::load_from_nvs(&s.1)
+                .and_then(|c| serde_json::to_value(c).ok());
             let snap = ConfigSnapshot {
                 wifi_list: &s.0.wifi_list,
                 server_url: s.0.server_url.as_str(),
+                asr_config,
             };
             if let Ok(json) = serde_json::to_string(&snap) {
                 c.set_value(json.as_bytes());
@@ -93,6 +99,16 @@ pub fn new_setting_service(
                 s.0.server_url = url.clone();
                 if let Err(e) = s.1.set_str("server_url", &url) {
                     log::error!("Failed to save server_url: {:?}", e);
+                }
+            }
+            if let Some(asr) = patch.asr_config {
+                match serde_json::from_value::<crate::audio::AsrConfig>(asr) {
+                    Ok(cfg) => {
+                        if let Err(e) = cfg.save_to_nvs(&mut s.1) {
+                            log::error!("Failed to save asr_config: {:?}", e);
+                        }
+                    }
+                    Err(e) => log::error!("Invalid asr_config: {:?}", e),
                 }
             }
         });

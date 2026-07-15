@@ -51,7 +51,7 @@ impl JpegBufferu16 {
         self.data.as_mut_ptr() as *mut u8
     }
 
-    /// 把整张图刷到 LCD (0, 0, width, height)。412×412 单页用这个。
+    /// 把整张图刷到 LCD (0, 0, width, height)。
     pub fn flush_to_lcd(&self) -> anyhow::Result<()> {
         let ptr = unsafe {
             std::slice::from_raw_parts(self.data.as_ptr() as *const u8, self.data.len() * 16)
@@ -66,6 +66,7 @@ impl JpegBufferu16 {
     }
 
     /// 取缓冲区 `[offset, offset+win_h)` 像素行刷到 LCD(本地滚动用,目前未用,保留备用)。
+    #[allow(dead_code)]
     pub fn flush_window(&self, offset: usize, win_h: usize) -> anyhow::Result<()> {
         let ptr = unsafe {
             std::slice::from_raw_parts(self.data.as_ptr() as *const u8, self.data.len() * 16)
@@ -88,11 +89,11 @@ impl JpegBufferu16 {
 
 /// 解码一帧 JPEG 到 RGB565 缓冲。
 ///
-/// `config.scale` 决定硬解码器的输出分辨率。手表屏幕 412×412,这里设成 412×412
-/// 让服务端按 Sync{412,412} 渲染的整屏图直接满屏。
+/// `config.scale` 决定硬解码器的输出分辨率。这里设成屏幕实际尺寸,
+/// 让服务端按 `ClientMessage::sync()` 渲染的整屏图直接满屏。
 ///
-/// 注意:412 不是 8 的倍数,若运行时 `jpeg_dec` 拒绝该 scale(解码报错/花屏),
-/// 把下面的 width/height 以及 `protocol::ClientMessage::sync()` 一起改成 **408**(8×51)。
+/// 注意:如果运行时 `jpeg_dec` 拒绝非 8 对齐的 scale(解码报错/花屏),
+/// 需要把服务端渲染尺寸和这里的 scale 一起改成硬件解码器可接受的尺寸。
 pub fn esp_jpeg_decode_one_picture(data: &[u8]) -> anyhow::Result<JpegBufferu16> {
     unsafe {
         use esp_idf_svc::sys::*;
@@ -101,9 +102,8 @@ pub fn esp_jpeg_decode_one_picture(data: &[u8]) -> anyhow::Result<JpegBufferu16>
         let mut config = jpeg_dec_config_t::default();
         config.output_type = jpeg_pixel_format_t_JPEG_PIXEL_FORMAT_RGB565_LE;
 
-        // 手表 412×412(若运行时不接受,改 408×408,并同步 protocol::ClientMessage::sync())
-        config.scale.height = 412;
-        config.scale.width = 412;
+        config.scale.height = crate::lcd::LCD_HEIGHT;
+        config.scale.width = crate::lcd::LCD_WIDTH;
 
         // Create jpeg_dec handle
         let decoder = JpegDecoder::open(&config)

@@ -106,11 +106,11 @@ impl ClientMessage {
     }
 
     /// 构造一帧 Sync:声明设备显示区像素尺寸。
-    /// 手表屏幕 412×412,单页不滚动。
+    /// Waveshare ESP32-S3-Touch-AMOLED-2.06 屏幕 410×502。
     pub fn sync() -> Self {
         Self::Sync {
-            width: 412,
-            height: 412,
+            width: crate::lcd::LCD_WIDTH,
+            height: crate::lcd::LCD_HEIGHT,
         }
     }
 
@@ -159,7 +159,7 @@ mod tests {
     fn test_client_sync_json() {
         let json = ClientMessage::sync().to_json().unwrap();
         match ClientMessage::from_json(&json).unwrap() {
-            ClientMessage::Sync { width, height } => assert_eq!((width, height), (412, 412)),
+            ClientMessage::Sync { width, height } => assert_eq!((width, height), (410, 502)),
             _ => panic!("Wrong message type"),
         }
     }

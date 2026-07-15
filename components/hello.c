@@ -1,106 +1,208 @@
-#include <stdio.h>
-#include "hello.h"
+#include <stdbool.h>
+#include <stdint.h>
 
-#define EXAMPLE_LCD_WIDTH (412)
-#define EXAMPLE_LCD_HEIGHT (412)
-#define EXAMPLE_LCD_COLOR_BITS (16)
+#include "esp_err.h"
+#include "bsp/esp-bsp.h"
+#include "bsp/display.h"
+#include "bsp/touch.h"
+#include "esp_codec_dev.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_lcd_touch.h"
+#include "esp_log.h"
 
-#define ESP_PANEL_HOST_SPI_ID_DEFAULT (SPI2_HOST)
-#define ESP_PANEL_LCD_SPI_MODE (0)                  // 0/1/2/3, typically set to 0
-#define ESP_PANEL_LCD_SPI_CLK_HZ (80 * 1000 * 1000) // Should be an integer divisor of 80M, typically set to 40M
-#define ESP_PANEL_LCD_SPI_TRANS_QUEUE_SZ (10)       // Typically set to 10
-#define ESP_PANEL_LCD_SPI_CMD_BITS (32)             // Typically set to 32
-#define ESP_PANEL_LCD_SPI_PARAM_BITS (8)            // Typically set to 8
+static const char *TAG = "board_bridge";
 
-#define ESP_PANEL_LCD_SPI_IO_SCK (40)
-#define ESP_PANEL_LCD_SPI_IO_DATA0 (46)
-#define ESP_PANEL_LCD_SPI_IO_DATA1 (45)
-#define ESP_PANEL_LCD_SPI_IO_DATA2 (42)
-#define ESP_PANEL_LCD_SPI_IO_DATA3 (41)
-#define ESP_PANEL_LCD_SPI_IO_CS (21)
-#define LCD_PIN_NUM_RST (-1) // EXIO2
+static esp_lcd_panel_handle_t panel_handle = NULL;
+static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
+static esp_lcd_touch_handle_t touch_handle = NULL;
+static esp_codec_dev_handle_t speaker_handle = NULL;
+static esp_codec_dev_handle_t microphone_handle = NULL;
+static bool microphone_opened = false;
 
-#define ESP_PANEL_HOST_SPI_MAX_TRANSFER_SIZE (2048)
+#define BOARD_AUDIO_SAMPLE_RATE (16000)
+#define BOARD_AUDIO_BITS_PER_SAMPLE (16)
+#define BOARD_AUDIO_CHANNELS (1)
 
-static const char *TAG = "LCD";
-
-esp_lcd_panel_handle_t panel_handle = NULL;
-
-esp_lcd_panel_handle_t get_panel_handle()
+esp_lcd_panel_handle_t get_panel_handle(void)
 {
     return panel_handle;
 }
 
-int QSPI_Init()
+int board_display_init(void)
 {
-    static const spi_bus_config_t host_config = {
-        .data0_io_num = ESP_PANEL_LCD_SPI_IO_DATA0,
-        .data1_io_num = ESP_PANEL_LCD_SPI_IO_DATA1,
-        .sclk_io_num = ESP_PANEL_LCD_SPI_IO_SCK,
-        .data2_io_num = ESP_PANEL_LCD_SPI_IO_DATA2,
-        .data3_io_num = ESP_PANEL_LCD_SPI_IO_DATA3,
-        .data4_io_num = -1,
-        .data5_io_num = -1,
-        .data6_io_num = -1,
-        .data7_io_num = -1,
-        .max_transfer_sz = ESP_PANEL_HOST_SPI_MAX_TRANSFER_SIZE,
-        .flags = SPICOMMON_BUSFLAG_MASTER,
-        .intr_flags = 0,
-    };
-    if (spi_bus_initialize(ESP_PANEL_HOST_SPI_ID_DEFAULT, &host_config, SPI_DMA_CH_AUTO) != ESP_OK)
-    {
-        ESP_LOGE(TAG, "The SPI initialization failed.");
-        return 0;
+    if (panel_handle != NULL) {
+        return ESP_OK;
     }
-    ESP_LOGI(TAG, "The SPI initialization succeeded.");
 
-    const esp_lcd_panel_io_spi_config_t io_config = {
-        .cs_gpio_num = ESP_PANEL_LCD_SPI_IO_CS,
-        .dc_gpio_num = -1,
-        .spi_mode = ESP_PANEL_LCD_SPI_MODE,
-        .pclk_hz = ESP_PANEL_LCD_SPI_CLK_HZ,
-        .trans_queue_depth = ESP_PANEL_LCD_SPI_TRANS_QUEUE_SZ,
-        .on_color_trans_done = NULL,
-        .user_ctx = NULL,
-        .lcd_cmd_bits = ESP_PANEL_LCD_SPI_CMD_BITS,
-        .lcd_param_bits = ESP_PANEL_LCD_SPI_PARAM_BITS,
-        .flags = {
-            .dc_low_on_data = 0,
-            .octal_mode = 0,
-            .quad_mode = 1,
-            .sio_mode = 0,
-            .lsb_first = 0,
-            .cs_high_active = 0,
-        },
+    const bsp_display_config_t config = {
+        .max_transfer_sz = BSP_LCD_H_RES * BSP_LCD_V_RES * BSP_LCD_BITS_PER_PIXEL / 8,
     };
-    esp_lcd_panel_io_handle_t io_handle = NULL;
-    if (esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)ESP_PANEL_HOST_SPI_ID_DEFAULT, &io_config, &io_handle) != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Failed to set LCD communication parameters -- SPI");
-        return 0;
+
+    esp_err_t err = bsp_display_new(&config, &panel_handle, &panel_io_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "bsp_display_new failed: %s", esp_err_to_name(err));
+        return err;
     }
-    ESP_LOGI(TAG, "LCD communication parameters are set successfully -- SPI\r\n");
 
-    ESP_LOGI(TAG, "Install LCD driver of SPD2010\r\n");
-    spd2010_vendor_config_t vendor_config = {
-        .flags = {
-            .use_qspi_interface = 1,
-        },
-    };
-    esp_lcd_panel_dev_config_t panel_config = {
-        .reset_gpio_num = LCD_PIN_NUM_RST,
-        .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
-        // .data_endian = LCD_RGB_DATA_ENDIAN_LITTLE,
-        .bits_per_pixel = EXAMPLE_LCD_COLOR_BITS,
-        .flags = {
-            .reset_active_high = 0,
-        },
-        .vendor_config = (void *)&vendor_config,
-    };
-    esp_lcd_new_panel_spd2010(io_handle, &panel_config, &panel_handle);
-    esp_lcd_panel_reset(panel_handle);
-    esp_lcd_panel_init(panel_handle);
-    // esp_lcd_panel_invert_color(panel_handle,false);
-    esp_lcd_panel_disp_on_off(panel_handle, true);
-    return 1;
+    err = bsp_display_brightness_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "bsp_display_brightness_init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    return ESP_OK;
+}
+
+int board_display_set_brightness(uint8_t percent)
+{
+    if (percent > 100) {
+        percent = 100;
+    }
+
+    return bsp_display_brightness_set(percent);
+}
+
+int board_touch_init(void)
+{
+    if (touch_handle != NULL) {
+        return ESP_OK;
+    }
+
+    esp_err_t err = bsp_touch_new(NULL, &touch_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "bsp_touch_new failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+bool board_touch_read(uint16_t *x, uint16_t *y, uint16_t *strength)
+{
+    if (touch_handle == NULL) {
+        return false;
+    }
+
+    esp_err_t err = esp_lcd_touch_read_data(touch_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_lcd_touch_read_data failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    uint8_t point_count = 0;
+    uint16_t local_x = 0;
+    uint16_t local_y = 0;
+    uint16_t local_strength = 0;
+    bool touched = esp_lcd_touch_get_coordinates(
+        touch_handle,
+        &local_x,
+        &local_y,
+        &local_strength,
+        &point_count,
+        1
+    );
+
+    if (!touched || point_count == 0) {
+        return false;
+    }
+
+    if (x != NULL) {
+        *x = local_x;
+    }
+    if (y != NULL) {
+        *y = local_y;
+    }
+    if (strength != NULL) {
+        *strength = local_strength;
+    }
+
+    return true;
+}
+
+int board_audio_init(void)
+{
+    if (speaker_handle != NULL && microphone_handle != NULL && microphone_opened) {
+        return ESP_OK;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Audio pins: I2C SDA=%d SCL=%d, I2S MCLK=%d BCLK=%d WS=%d DOUT=%d DIN=%d PA=%d",
+        BSP_I2C_SDA,
+        BSP_I2C_SCL,
+        BSP_I2S_MCLK,
+        BSP_I2S_SCLK,
+        BSP_I2S_LCLK,
+        BSP_I2S_DOUT,
+        BSP_I2S_DSIN,
+        BSP_POWER_AMP_IO
+    );
+
+    if (speaker_handle == NULL) {
+        speaker_handle = bsp_audio_codec_speaker_init();
+        if (speaker_handle == NULL) {
+            ESP_LOGE(TAG, "bsp_audio_codec_speaker_init failed");
+            return ESP_FAIL;
+        }
+
+        int err = esp_codec_dev_set_out_vol(speaker_handle, 50);
+        if (err != ESP_CODEC_DEV_OK) {
+            ESP_LOGE(TAG, "esp_codec_dev_set_out_vol failed: %d", err);
+            return err;
+        }
+    }
+
+    if (microphone_handle == NULL) {
+        microphone_handle = bsp_audio_codec_microphone_init();
+        if (microphone_handle == NULL) {
+            ESP_LOGE(TAG, "bsp_audio_codec_microphone_init failed");
+            return ESP_FAIL;
+        }
+
+        int err = esp_codec_dev_set_in_gain(microphone_handle, 30.0f);
+        if (err != ESP_CODEC_DEV_OK) {
+            ESP_LOGE(TAG, "esp_codec_dev_set_in_gain failed: %d", err);
+            return err;
+        }
+    }
+
+    if (!microphone_opened) {
+        esp_codec_dev_sample_info_t fs = {
+            .bits_per_sample = BOARD_AUDIO_BITS_PER_SAMPLE,
+            .channel = BOARD_AUDIO_CHANNELS,
+            .channel_mask = 0,
+            .sample_rate = BOARD_AUDIO_SAMPLE_RATE,
+            .mclk_multiple = 0,
+        };
+        int err = esp_codec_dev_open(microphone_handle, &fs);
+        if (err != ESP_CODEC_DEV_OK) {
+            ESP_LOGE(TAG, "esp_codec_dev_open microphone failed: %d", err);
+            return err;
+        }
+        microphone_opened = true;
+    }
+
+    return ESP_OK;
+}
+
+int board_audio_read_mic(void *data, int len)
+{
+    if (data == NULL || len <= 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    int err = board_audio_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = esp_codec_dev_read(microphone_handle, data, len);
+    if (err != ESP_CODEC_DEV_OK) {
+        return err;
+    }
+
+    return len;
+}
+
+int board_audio_sample_rate(void)
+{
+    return BOARD_AUDIO_SAMPLE_RATE;
 }

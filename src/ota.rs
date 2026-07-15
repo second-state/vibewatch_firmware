@@ -1,17 +1,16 @@
 //! OTA 救援固件(独立 `[[bin]]`,烧到 ota_0 槽)。
 //!
 //! 主固件 `goto_next_firmware()` 把启动槽切到 ota_0 后重启 → 进入本固件:
-//! 复位屏 → 连 WiFi(复用 wifi_list)→ 起 HTTP server → 屏上显示 `http://<ip>/`
+//! 初始化屏幕 → 连 WiFi(复用 wifi_list)→ 起 HTTP server → 屏上显示 `http://<ip>/`
 //! → 浏览器拖入 .bin → `EspOta` 写到另一槽(ota_1)→ complete → 重启进新主固件。
 //!
 //! 手表无物理按键:进本槽即意味着要 OTA,不做 Accept/ESC 确认(将来接触屏可加)。
-//! 复用本 crate 的 lcd / exio / network / setting / ui 模块(不拉 BLE / MQTT / JPEG)。
+//! 复用本 crate 的 lcd / network / setting / ui 模块(不拉 BLE / MQTT / JPEG)。
 
 // 救援固件只用共享模块(setting/ui/new_jpg)的一部分;跨 bin 编译时其余 API 算 dead_code,
 // 这里整体 allow,避免噪音(主固件那份编译不受影响)。
 #![allow(dead_code)]
 
-mod exio;
 mod lcd;
 mod network;
 mod setting;
@@ -43,17 +42,10 @@ fn main() -> anyhow::Result<()> {
     let nvs = esp_idf_svc::nvs::EspDefaultNvs::new(partition, "setting", true)?;
     let setting = Setting::load_from_nvs(&nvs)?;
 
-    // === LCD:与主固件相同的初始化序列(I2C 扩展 IO 复位 SPD2010 + QSPI + 背光) ===
-    let mut i2c = exio::i2c_init(
-        peripherals.i2c0,
-        peripherals.pins.gpio11,
-        peripherals.pins.gpio10,
-    )?;
-    exio::exio_init(&mut i2c)?;
-    lcd::spd2010_reset(&mut i2c)?;
-    lcd::qspi_init();
-    let mut ledc_timer = lcd::backlight_init(peripherals.pins.gpio5.into())?;
-    lcd::set_backlight(&mut ledc_timer, 30)?;
+    // === LCD + touch: Waveshare ESP32-S3-Touch-AMOLED-2.06 BSP ===
+    lcd::init()?;
+    lcd::touch_init()?;
+    lcd::set_backlight(30)?;
     // ===
 
     ui::ui_background().ok();

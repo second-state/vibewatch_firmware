@@ -67,3 +67,6 @@ component_dirs = ["components"]
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/esp_new_jpeg", version = "^1.0.0" }
 bindings_header = "components/esp_new_jpeg/bindgen.h"
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "waveshare/esp32_s3_touch_amoled_2_06", version = "^2.0.0" }

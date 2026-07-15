@@ -45,6 +45,7 @@ impl Setting {
     pub fn clear_nvs(nvs: &mut EspDefaultNvs) -> anyhow::Result<()> {
         nvs.remove(WIFI_LIST_KEY)?;
         nvs.remove("server_url")?;
+        nvs.remove("asr_config")?;
         Ok(())
     }
 

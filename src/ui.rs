@@ -70,8 +70,8 @@ pub struct UI {
     >,
 }
 
-const DISPLAY_WIDTH: usize = 412;
-const DISPLAY_HEIGHT: usize = 412;
+const DISPLAY_WIDTH: usize = crate::lcd::LCD_WIDTH as usize;
+const DISPLAY_HEIGHT: usize = crate::lcd::LCD_HEIGHT as usize;
 const COLOR_WIDTH: u32 = 2;
 
 impl Default for UI {

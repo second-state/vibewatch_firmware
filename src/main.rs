@@ -1,7 +1,7 @@
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::reset::restart};
 
+mod audio;
 mod ble_provision;
-mod exio;
 mod lcd;
 mod mqtt;
 mod network;
@@ -10,6 +10,7 @@ mod protocol;
 mod remote;
 mod setting;
 mod ui;
+mod util;
 
 const DEFAULT_SNTP_SERVERS: [&str; 4] = [
     "time.windows.com",
@@ -34,18 +35,16 @@ fn main() -> anyhow::Result<()> {
     let partition = esp_idf_svc::nvs::EspDefaultNvsPartition::take()?;
     let nvs = esp_idf_svc::nvs::EspDefaultNvs::new(partition, "setting", true)?;
     let setting = setting::Setting::load_from_nvs(&nvs)?;
+    let asr_config = audio::AsrConfig::load_from_nvs(&nvs);
 
-    // === LCD: I2C 扩展 IO 复位 SPD2010 + QSPI + 背光 ===
-    let mut i2c = exio::i2c_init(
-        peripherals.i2c0,
-        peripherals.pins.gpio11,
-        peripherals.pins.gpio10,
-    )?;
-    exio::exio_init(&mut i2c)?;
-    lcd::spd2010_reset(&mut i2c)?;
-    lcd::qspi_init();
-    let mut ledc_timer = lcd::backlight_init(peripherals.pins.gpio5.into())?;
-    lcd::set_backlight(&mut ledc_timer, 30)?;
+    // === LCD + touch: Waveshare ESP32-S3-Touch-AMOLED-2.06 BSP ===
+    lcd::init()?;
+    lcd::touch_init()?;
+    lcd::set_backlight(30)?;
+    // ===
+
+    // === Audio: Waveshare BSP I2S + ES8311 speaker + ES7210 microphone ===
+    audio::init()?;
     // ===
 
     ui::ui_background().ok();
@@ -80,8 +79,10 @@ fn main() -> anyhow::Result<()> {
     let _wifi = wifi.unwrap();
     log::info!("WiFi connected");
 
-    // mqtts:// 需要 TLS 证书校验 → 先 SNTP 同步时间;mqtt:// 明文跳过。
-    if setting.server_url.starts_with("mqtts") {
+    // mqtts:// / Whisper https:// 需要 TLS 证书校验 → 先 SNTP 同步时间。
+    if setting.server_url.starts_with("mqtts")
+        || asr_config.as_ref().map_or(false, |c| c.requires_tls())
+    {
         gui.state = "Syncing time...".to_string();
         gui.text.clear();
         gui.display_flush().ok();
@@ -99,7 +100,39 @@ fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let r = runtime.block_on(remote::run(setting.server_url, client_id, &mut gui));
+
+    let (asr_tx, asr_rx) = std::sync::mpsc::channel::<audio::AsrRequest>();
+    if let Err(e) = std::thread::Builder::new()
+        .name("asr-worker".to_string())
+        .stack_size(1024 * 16)
+        .spawn(move || {
+            let mut driver = audio::Driver::new()
+                .map_err(|e| log::error!("Failed to create audio driver: {e:?}"))
+                .ok();
+            while let Ok(req) = asr_rx.recv() {
+                let result = match driver.as_mut() {
+                    Some(driver) => driver.start_asr(
+                        &req.config,
+                        || {},
+                        || req.cancel.load(std::sync::atomic::Ordering::Relaxed),
+                    ),
+                    None => Err(anyhow::anyhow!("audio driver unavailable")),
+                };
+                let _ = req.respond.send(result);
+            }
+            log::info!("ASR worker thread exited");
+        })
+    {
+        log::error!("Failed to spawn ASR worker thread: {e:?}");
+    }
+
+    let r = runtime.block_on(remote::run(
+        setting.server_url,
+        client_id,
+        &mut gui,
+        asr_tx,
+        asr_config.as_ref(),
+    ));
     log::info!("remote exited: {:?}", r);
 
     let mut gui = ui::UI::default();
