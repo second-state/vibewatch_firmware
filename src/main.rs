@@ -6,6 +6,7 @@ mod lcd;
 mod mqtt;
 mod network;
 mod new_jpg;
+mod power;
 mod protocol;
 mod remote;
 mod setting;
@@ -41,6 +42,8 @@ fn main() -> anyhow::Result<()> {
     lcd::init()?;
     lcd::touch_init()?;
     lcd::set_backlight(30)?;
+    power::init()?;
+    power::start_power_key_worker();
     // ===
 
     // === Audio: Waveshare BSP I2S + ES8311 speaker + ES7210 microphone ===

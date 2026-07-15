@@ -6,6 +6,7 @@
 #include "bsp/display.h"
 #include "bsp/touch.h"
 #include "esp_codec_dev.h"
+#include "driver/i2c_master.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_touch.h"
 #include "esp_log.h"
@@ -17,11 +18,18 @@ static esp_lcd_panel_io_handle_t panel_io_handle = NULL;
 static esp_lcd_touch_handle_t touch_handle = NULL;
 static esp_codec_dev_handle_t speaker_handle = NULL;
 static esp_codec_dev_handle_t microphone_handle = NULL;
+static i2c_master_dev_handle_t pmu_handle = NULL;
 static bool microphone_opened = false;
 
 #define BOARD_AUDIO_SAMPLE_RATE (16000)
 #define BOARD_AUDIO_BITS_PER_SAMPLE (16)
 #define BOARD_AUDIO_CHANNELS (1)
+
+#define AXP2101_I2C_ADDR (0x34)
+#define AXP2101_COMMON_CONFIG (0x10)
+#define AXP2101_INTEN2 (0x41)
+#define AXP2101_INTSTS2 (0x49)
+#define AXP2101_PKEY_LONG_IRQ_MASK (1 << 2)
 
 esp_lcd_panel_handle_t get_panel_handle(void)
 {
@@ -73,6 +81,103 @@ int board_touch_init(void)
         ESP_LOGE(TAG, "bsp_touch_new failed: %s", esp_err_to_name(err));
     }
     return err;
+}
+
+static esp_err_t pmu_read_reg(uint8_t reg, uint8_t *data)
+{
+    if (pmu_handle == NULL || data == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return i2c_master_transmit_receive(pmu_handle, &reg, 1, data, 1, 100);
+}
+
+static esp_err_t pmu_write_reg(uint8_t reg, uint8_t data)
+{
+    if (pmu_handle == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint8_t buffer[2] = {reg, data};
+    return i2c_master_transmit(pmu_handle, buffer, sizeof(buffer), 100);
+}
+
+int board_pmu_init(void)
+{
+    if (pmu_handle != NULL) {
+        return ESP_OK;
+    }
+
+    i2c_master_bus_handle_t bus = bsp_i2c_get_handle();
+    if (bus == NULL) {
+        ESP_LOGE(TAG, "bsp_i2c_get_handle failed");
+        return ESP_FAIL;
+    }
+
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = AXP2101_I2C_ADDR,
+        .scl_speed_hz = CONFIG_BSP_I2C_CLK_SPEED_HZ,
+    };
+    esp_err_t err = i2c_master_bus_add_device(bus, &dev_cfg, &pmu_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "add AXP2101 I2C device failed: %s", esp_err_to_name(err));
+        pmu_handle = NULL;
+        return err;
+    }
+
+    uint8_t int_en2 = 0;
+    err = pmu_read_reg(AXP2101_INTEN2, &int_en2);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "read AXP2101 INTEN2 failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = pmu_write_reg(AXP2101_INTEN2, int_en2 | AXP2101_PKEY_LONG_IRQ_MASK);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "enable AXP2101 PKEY long IRQ failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // Clear any stale PKEY long flag from boot.
+    uint8_t int_sts2 = 0;
+    if (pmu_read_reg(AXP2101_INTSTS2, &int_sts2) == ESP_OK && (int_sts2 & AXP2101_PKEY_LONG_IRQ_MASK)) {
+        pmu_write_reg(AXP2101_INTSTS2, AXP2101_PKEY_LONG_IRQ_MASK);
+    }
+
+    ESP_LOGI(TAG, "AXP2101 PKEY long-press poweroff enabled");
+    return ESP_OK;
+}
+
+bool board_pmu_take_pkey_long_press(void)
+{
+    if (pmu_handle == NULL) {
+        return false;
+    }
+
+    uint8_t int_sts2 = 0;
+    esp_err_t err = pmu_read_reg(AXP2101_INTSTS2, &int_sts2);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "read AXP2101 INTSTS2 failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    if ((int_sts2 & AXP2101_PKEY_LONG_IRQ_MASK) == 0) {
+        return false;
+    }
+
+    pmu_write_reg(AXP2101_INTSTS2, AXP2101_PKEY_LONG_IRQ_MASK);
+    return true;
+}
+
+int board_pmu_shutdown(void)
+{
+    uint8_t value = 0;
+    esp_err_t err = pmu_read_reg(AXP2101_COMMON_CONFIG, &value);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "read AXP2101 COMMON_CONFIG failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    ESP_LOGW(TAG, "AXP2101 soft poweroff");
+    return pmu_write_reg(AXP2101_COMMON_CONFIG, value | 0x01);
 }
 
 bool board_touch_read(uint16_t *x, uint16_t *y, uint16_t *strength)

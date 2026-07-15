@@ -13,6 +13,7 @@
 
 mod lcd;
 mod network;
+mod power;
 mod setting;
 mod ui;
 
@@ -46,6 +47,8 @@ fn main() -> anyhow::Result<()> {
     lcd::init()?;
     lcd::touch_init()?;
     lcd::set_backlight(30)?;
+    power::init()?;
+    power::start_power_key_worker();
     // ===
 
     ui::ui_background().ok();
