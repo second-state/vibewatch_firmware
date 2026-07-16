@@ -16,7 +16,7 @@ static TOUCH_NOTIFY: HalIsrNotification = HalIsrNotification::new();
 pub const LCD_WIDTH: u16 = 410;
 pub const LCD_HEIGHT: u16 = 502;
 pub const LCD_COLOR_BITS: u16 = 16;
-const FLUSH_CHUNK_ROWS: i32 = 32;
+const FLUSH_CHUNK_ROWS: i32 = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TouchPoint {
