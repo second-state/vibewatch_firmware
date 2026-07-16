@@ -57,6 +57,9 @@ fn main() -> anyhow::Result<()> {
     // ===
 
     ui::ui_background().ok();
+    if let Err(e) = ui::render_terminal_ans_demo() {
+        log::warn!("terminal ans demo failed: {e:?}");
+    }
     let mut gui = ui::UI::default();
 
     if setting.need_init() {

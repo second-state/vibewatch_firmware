@@ -42,9 +42,11 @@ serde_json = "1.0"
 
 # UI
 embedded-graphics = "0.8.1"
+embedded-graphics-terminal = { path = "../embedded-graphics-terminal", features = ["timing"] }
 embedded-text = "0.7.2"
-u8g2-fonts = { version = "0.5.0", features = ["embedded_graphics_textstyle"] }
+u8g2-fonts = { version = "0.8", features = ["embedded_graphics_textstyle"] }
 tinygif = "0.0.4"
+vt100 = { git = "https://github.com/second-state/vt100-rust", rev = "a34c13a22acb5ba16dab30f103c85f27c9dad930" }
 
 tokio = { version = "1.43.0", features = [
     "net",

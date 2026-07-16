@@ -1,9 +1,11 @@
 use embedded_graphics::{
+    draw_target::DrawTarget,
     framebuffer::{buffer_size, Framebuffer},
-    image::GetPixel,
+    geometry::OriginDimensions,
+    image::{GetPixel, ImageRaw},
     pixelcolor::{
-        raw::{BigEndian, RawU16},
-        Rgb565,
+        raw::{BigEndian, RawData, RawU16},
+        Rgb565, RgbColor,
     },
     prelude::*,
     primitives::{PrimitiveStyleBuilder, Rectangle},
@@ -13,26 +15,139 @@ use embedded_text::TextBox;
 use u8g2_fonts::U8g2TextStyle;
 
 const GIF_IMG: &[u8] = include_bytes!("../assets/ht.gif");
+const TERMINAL_ANS: &str = include_str!("../../embedded-graphics-terminal/vibetty.ans");
 
 type ColorFormat = Rgb565;
+type DisplayFramebuffer = Framebuffer<
+    ColorFormat,
+    RawU16,
+    BigEndian,
+    DISPLAY_WIDTH,
+    DISPLAY_HEIGHT,
+    { buffer_size::<ColorFormat>(DISPLAY_WIDTH, DISPLAY_HEIGHT) },
+>;
+
+struct FastFramebuffer {
+    inner: Box<DisplayFramebuffer>,
+}
+
+impl FastFramebuffer {
+    fn new() -> Self {
+        Self {
+            inner: Box::new(DisplayFramebuffer::new()),
+        }
+    }
+
+    fn data(&self) -> &[u8] {
+        self.inner.data()
+    }
+
+    fn as_image(&self) -> ImageRaw<'_, ColorFormat, BigEndian> {
+        self.inner.as_image()
+    }
+
+    fn set_pixel_fast(&mut self, p: Point, color: ColorFormat) {
+        if p.x < 0 || p.y < 0 {
+            return;
+        }
+        let x = p.x as usize;
+        let y = p.y as usize;
+        if x >= DISPLAY_WIDTH || y >= DISPLAY_HEIGHT {
+            return;
+        }
+
+        let [hi, lo] = rgb565_be(color);
+        let index = (y * DISPLAY_WIDTH + x) * 2;
+        let data = self.inner.data_mut();
+        data[index] = hi;
+        data[index + 1] = lo;
+    }
+}
+
+impl OriginDimensions for FastFramebuffer {
+    fn size(&self) -> Size {
+        Size::new(DISPLAY_WIDTH as u32, DISPLAY_HEIGHT as u32)
+    }
+}
+
+impl DrawTarget for FastFramebuffer {
+    type Color = ColorFormat;
+    type Error = std::convert::Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        for Pixel(p, c) in pixels {
+            self.set_pixel_fast(p, c);
+        }
+        Ok(())
+    }
+
+    fn fill_solid(&mut self, area: &Rectangle, color: Self::Color) -> Result<(), Self::Error> {
+        let area = area.intersection(&self.bounding_box());
+        if area.size.width == 0 || area.size.height == 0 {
+            return Ok(());
+        }
+
+        let x_start = area.top_left.x as usize;
+        let y_start = area.top_left.y as usize;
+        let width = area.size.width as usize;
+        let height = area.size.height as usize;
+        let raw = RawU16::from(color).into_inner();
+        let data = self.inner.data_mut();
+
+        for y in y_start..(y_start + height) {
+            let row_start = (y * DISPLAY_WIDTH + x_start) * 2;
+            let row = &mut data[row_start..row_start + width * 2];
+            fill_rgb565_be_row(row, raw);
+        }
+
+        Ok(())
+    }
+}
+
+fn fill_rgb565_be_row(row: &mut [u8], raw: u16) {
+    debug_assert_eq!(row.len() % 2, 0);
+
+    let [hi, lo] = raw.to_be_bytes();
+    if row.as_ptr() as usize & 1 == 0 {
+        let words = unsafe {
+            core::slice::from_raw_parts_mut(row.as_mut_ptr().cast::<u16>(), row.len() / 2)
+        };
+        words.fill(raw.to_be());
+    } else if row.len() >= 2 {
+        row[0] = hi;
+        row[row.len() - 1] = lo;
+        let middle_len = row.len().saturating_sub(2);
+        if middle_len > 0 {
+            let words = unsafe {
+                core::slice::from_raw_parts_mut(
+                    row.as_mut_ptr().add(1).cast::<u16>(),
+                    middle_len / 2,
+                )
+            };
+            words.fill(raw.to_le());
+        }
+    } else {
+        debug_assert!(row.is_empty());
+    }
+}
+
+fn rgb565_be(color: ColorFormat) -> [u8; 2] {
+    RawU16::from(color).into_inner().to_be_bytes()
+}
 
 pub fn ui_background() -> Result<(), std::convert::Infallible> {
     let image = tinygif::Gif::<ColorFormat>::from_slice(GIF_IMG).unwrap();
 
     // Create a new framebuffer
-    let mut display = Box::new(Framebuffer::<
-        ColorFormat,
-        _,
-        BigEndian,
-        DISPLAY_WIDTH,
-        DISPLAY_HEIGHT,
-        { buffer_size::<ColorFormat>(DISPLAY_WIDTH, DISPLAY_HEIGHT) },
-    >::new());
+    let mut display = FastFramebuffer::new();
 
     display.clear(ColorFormat::WHITE)?;
 
     for frame in image.frames() {
-        frame.draw(display.as_mut())?;
+        frame.draw(&mut display)?;
         crate::lcd::flush_display(
             display.data(),
             0,
@@ -42,6 +157,77 @@ pub fn ui_background() -> Result<(), std::convert::Infallible> {
         );
         let delay_ms = frame.delay_centis * 10;
         std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
+    }
+
+    Ok(())
+}
+
+pub fn render_terminal_ans_demo() -> anyhow::Result<()> {
+    use embedded_graphics_terminal::TerminalRenderer;
+    use u8g2_fonts::fonts::{
+        u8g2_font_unifont_t_78_79, u8g2_font_unifont_t_gb2312, u8g2_font_unifont_t_symbols,
+    };
+    use vt100::Parser;
+
+    let mut display = FastFramebuffer::new();
+
+    let mut renderer = TerminalRenderer::new(
+        display.size(),
+        u8g2_font_unifont_t_gb2312,
+        ColorFormat::WHITE,
+        ColorFormat::BLACK,
+    )
+    .with_fallback_font(u8g2_font_unifont_t_symbols)
+    .with_fallback_font(u8g2_font_unifont_t_78_79);
+    let (cell_w, cell_h) = renderer.cell_size();
+    log::info!(
+        "Terminal renderer: {}x{} cells, cell={}x{}, ansi={} bytes",
+        renderer.cols(),
+        renderer.rows(),
+        cell_w,
+        cell_h,
+        TERMINAL_ANS.len()
+    );
+
+    for frame in 1..=2 {
+        display.clear(ColorFormat::BLACK)?;
+
+        let parse_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+        let mut parser = Parser::new(renderer.rows(), renderer.cols(), 0);
+        parser.process(TERMINAL_ANS.as_bytes());
+        let parse_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - parse_start_us;
+
+        let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+        renderer.render(parser.screen(), &mut display)?;
+        let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
+        let total_elapsed_us = parse_elapsed_us + render_elapsed_us;
+        log::info!(
+            "Terminal frame {} ANSI to framebuffer took {} us ({:.2} ms): parse={} us, render={} us",
+            frame,
+            total_elapsed_us,
+            total_elapsed_us as f32 / 1000.0,
+            parse_elapsed_us,
+            render_elapsed_us
+        );
+
+        let flush_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+        let e = crate::lcd::flush_display(
+            display.data(),
+            0,
+            0,
+            crate::lcd::LCD_WIDTH as i32,
+            crate::lcd::LCD_HEIGHT as i32,
+        );
+        let flush_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - flush_start_us;
+        log::info!(
+            "Terminal frame {} framebuffer flush took {} us ({:.2} ms)",
+            frame,
+            flush_elapsed_us,
+            flush_elapsed_us as f32 / 1000.0
+        );
+        if e != 0 {
+            log::warn!("flush terminal demo frame {frame} error: {e}");
+        }
     }
 
     Ok(())
@@ -58,16 +244,7 @@ pub struct UI {
     text_background: Vec<Pixel<ColorFormat>>,
 
     pub reset: bool,
-    display: Box<
-        Framebuffer<
-            ColorFormat,
-            RawU16,
-            BigEndian,
-            DISPLAY_WIDTH,
-            DISPLAY_HEIGHT,
-            { buffer_size::<ColorFormat>(DISPLAY_WIDTH, DISPLAY_HEIGHT) },
-        >,
-    >,
+    display: Box<FastFramebuffer>,
 }
 
 const DISPLAY_WIDTH: usize = crate::lcd::LCD_WIDTH as usize;
@@ -76,14 +253,7 @@ const COLOR_WIDTH: u32 = 2;
 
 impl Default for UI {
     fn default() -> Self {
-        let mut display = Box::new(Framebuffer::<
-            ColorFormat,
-            _,
-            BigEndian,
-            DISPLAY_WIDTH,
-            DISPLAY_HEIGHT,
-            { buffer_size::<ColorFormat>(DISPLAY_WIDTH, DISPLAY_HEIGHT) },
-        >::new());
+        let mut display = Box::new(FastFramebuffer::new());
 
         display.clear(ColorFormat::WHITE).unwrap();
 
