@@ -61,6 +61,9 @@ pub async fn run(
                                 server.clear_active();
                                 server.flush_pending().await?;
                                 open_session_picker(&mut server, gui, &mut touch_rx).await?;
+                            } else if let Some(msg) = scroll_swipe_message(start, touch) {
+                                log::info!("Vertical swipe detected, sending {msg:?}");
+                                server.send(msg).await?;
                             }
                         }
                     }
@@ -222,6 +225,26 @@ fn is_back_swipe(start: lcd::TouchPoint, end: lcd::TouchPoint) -> bool {
     dx >= MIN_RIGHT_SWIPE_PX && dy <= MAX_VERTICAL_DRIFT_PX
 }
 
+fn scroll_swipe_message(
+    start: lcd::TouchPoint,
+    end: lcd::TouchPoint,
+) -> Option<protocol::ClientMessage> {
+    const MIN_VERTICAL_SWIPE_PX: i32 = 80;
+    const MAX_HORIZONTAL_DRIFT_PX: i32 = 80;
+
+    let dx = (end.x as i32 - start.x as i32).abs();
+    let dy = end.y as i32 - start.y as i32;
+    if dx > MAX_HORIZONTAL_DRIFT_PX || dy.abs() < MIN_VERTICAL_SWIPE_PX {
+        return None;
+    }
+
+    if dy < 0 {
+        Some(protocol::ClientMessage::ScrollDown { rows: 0 })
+    } else {
+        Some(protocol::ClientMessage::ScrollUp { rows: 0 })
+    }
+}
+
 async fn wait_touch_release(touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>) {
     loop {
         tokio::select! {
@@ -262,19 +285,62 @@ async fn open_session_picker(
 
     let mut labels = Vec::new();
     let mut item_rects = Vec::new();
-    render_session_picker(server, gui, &mut labels, &mut item_rects);
+    let mut scroll_offset = 0usize;
+    render_session_picker(server, gui, &mut labels, &mut item_rects, scroll_offset);
 
+    let mut press_touch = None;
     loop {
         tokio::select! {
             event = touch_rx.recv() => {
-                if let Some(index) = touched_session_event_index(event, &item_rects) {
-                    let prefix = labels[index].0.clone();
-                    server.set_active(&prefix);
-                    server.send(protocol::ClientMessage::sync()).await?;
-                    return Ok(());
-                } else if touch_rx.is_closed() {
-                    log::warn!("Touch event source closed during session picker");
-                    return Ok(());
+                match event {
+                    Some(lcd::TouchEvent::Press(touch)) => {
+                        if press_touch.is_none() {
+                            press_touch = Some(touch);
+                        }
+                    }
+                    Some(lcd::TouchEvent::Release(touch)) => {
+                        let Some(start) = press_touch.take() else {
+                            continue;
+                        };
+                        if let Some(delta) = list_scroll_delta(start, touch) {
+                            let visible_count = item_rects.len().max(1);
+                            let max_offset = labels.len().saturating_sub(visible_count);
+                            let next_offset = if delta > 0 {
+                                scroll_offset.saturating_add(delta as usize).min(max_offset)
+                            } else {
+                                scroll_offset.saturating_sub((-delta) as usize)
+                            };
+                            if next_offset != scroll_offset {
+                                scroll_offset = next_offset;
+                                log::info!("Session list scroll offset={}", scroll_offset);
+                                render_session_picker(
+                                    server,
+                                    gui,
+                                    &mut labels,
+                                    &mut item_rects,
+                                    scroll_offset,
+                                );
+                            }
+                            continue;
+                        }
+
+                        let press_index = crate::ui::list_touch_index(start, &item_rects);
+                        let release_index = crate::ui::list_touch_index(touch, &item_rects);
+                        if press_index.is_some() && press_index == release_index {
+                            let visible_index = press_index.unwrap();
+                            let index = scroll_offset + visible_index;
+                            if let Some((prefix, ..)) = labels.get(index) {
+                                let prefix = prefix.clone();
+                                server.set_active(&prefix);
+                                server.send(protocol::ClientMessage::sync()).await?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    None => {
+                        log::warn!("Touch event source closed during session picker");
+                        return Ok(());
+                    }
                 }
             }
             ev = server.recv() => {
@@ -282,7 +348,14 @@ async fn open_session_picker(
                 match ev {
                     Some(MqttEvent::Presence { list_changed, .. }) => {
                         if list_changed {
-                            render_session_picker(server, gui, &mut labels, &mut item_rects);
+                            scroll_offset = clamp_session_scroll_offset(server, scroll_offset, item_rects.len().max(1));
+                            render_session_picker(
+                                server,
+                                gui,
+                                &mut labels,
+                                &mut item_rects,
+                                scroll_offset,
+                            );
                         }
                     }
                     Some(MqttEvent::ActiveScreen(_)) => continue,
@@ -300,6 +373,7 @@ fn render_session_picker(
     gui: &mut UI,
     labels: &mut Vec<SessionLabel>,
     item_rects: &mut Vec<embedded_graphics::primitives::Rectangle>,
+    scroll_offset: usize,
 ) {
     *labels = server.session_labels();
     if labels.is_empty() {
@@ -308,18 +382,38 @@ fn render_session_picker(
     } else {
         let items: Vec<(String, bool)> = labels
             .iter()
+            .skip(scroll_offset)
             .map(|(_, label, _, is_working)| (label.clone(), *is_working))
             .collect();
         *item_rects = gui.display_list("Sessions", &items, 0).unwrap_or_default();
     }
 }
 
-fn touched_session_event_index(
-    event: Option<lcd::TouchEvent>,
-    item_rects: &[embedded_graphics::primitives::Rectangle],
-) -> Option<usize> {
-    match event {
-        Some(lcd::TouchEvent::Press(touch)) => crate::ui::list_touch_index(touch, item_rects),
-        _ => None,
+fn clamp_session_scroll_offset(
+    server: &MqttServer,
+    scroll_offset: usize,
+    visible_count: usize,
+) -> usize {
+    server
+        .session_labels()
+        .len()
+        .saturating_sub(visible_count)
+        .min(scroll_offset)
+}
+
+fn list_scroll_delta(start: lcd::TouchPoint, end: lcd::TouchPoint) -> Option<isize> {
+    const MIN_VERTICAL_SWIPE_PX: i32 = 80;
+    const MAX_HORIZONTAL_DRIFT_PX: i32 = 80;
+
+    let dx = (end.x as i32 - start.x as i32).abs();
+    let dy = end.y as i32 - start.y as i32;
+    if dx > MAX_HORIZONTAL_DRIFT_PX || dy.abs() < MIN_VERTICAL_SWIPE_PX {
+        return None;
+    }
+
+    if dy < 0 {
+        Some(-1)
+    } else {
+        Some(1)
     }
 }
