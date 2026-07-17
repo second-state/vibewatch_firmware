@@ -14,8 +14,10 @@ use crate::{
     audio, boot::BootButton, lcd, mqtt::MqttEvent, mqtt::MqttServer, new_jpg, protocol, ui::UI,
 };
 
-const BACKLIGHT_NORMAL: u8 = 80;
+const BACKLIGHT_NORMAL: u8 = 50;
 const BACKLIGHT_DIM: u8 = 10;
+const SESSION_LIST_IDLE_DIM_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+const SESSION_LIST_TITLE_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BacklightMode {
@@ -814,8 +816,24 @@ async fn open_session_picker(
     render_session_picker(server, gui, &mut labels, &mut item_rects, scroll_offset);
 
     let mut press_touch = None;
+    let mut last_list_change = tokio::time::Instant::now();
+    let mut next_title_refresh = last_list_change + SESSION_LIST_TITLE_REFRESH_DELAY;
     loop {
         tokio::select! {
+            _ = tokio::time::sleep_until(next_title_refresh) => {
+                next_title_refresh = tokio::time::Instant::now() + SESSION_LIST_TITLE_REFRESH_DELAY;
+                render_session_picker(
+                    server,
+                    gui,
+                    &mut labels,
+                    &mut item_rects,
+                    scroll_offset,
+                );
+            }
+            _ = tokio::time::sleep_until(last_list_change + SESSION_LIST_IDLE_DIM_DELAY), if *backlight != BacklightMode::Dim => {
+                log::info!("Session list unchanged for 30s, dimming screen");
+                backlight.set(BacklightMode::Dim)?;
+            }
             _ = crate::boot::wait_boot_press(boot_button) => {
                 log::info!("BOOT menu requested from session list");
                 match show_boot_menu(server, gui, touch_rx).await? {
@@ -842,6 +860,7 @@ async fn open_session_picker(
                     }
                     BootMenuAction::RestoreScreen => {
                         backlight.set(BacklightMode::Normal)?;
+                        last_list_change = tokio::time::Instant::now();
                         render_session_picker(
                             server,
                             gui,
@@ -918,6 +937,7 @@ async fn open_session_picker(
                 match ev {
                     Some(MqttEvent::Presence { list_changed, .. }) => {
                         if list_changed {
+                            last_list_change = tokio::time::Instant::now();
                             backlight.set(BacklightMode::Normal)?;
                             scroll_offset = clamp_session_scroll_offset(server, scroll_offset, item_rects.len().max(1));
                             render_session_picker(
@@ -957,8 +977,8 @@ fn render_session_picker(
             .map(|(_, label, _, is_working)| (label.clone(), *is_working))
             .collect();
         let title = match crate::power::battery_percent() {
-            Some(percent) => format!("Sessions  {percent}%"),
-            None => "Sessions  Bat: --".to_string(),
+            Some(percent) => format!("Session: Battery {percent}%"),
+            None => "Session: Battery --".to_string(),
         };
         *item_rects = gui.display_menu_list(&title, &items).unwrap_or_default();
     }
