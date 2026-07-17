@@ -69,7 +69,11 @@ pub enum MqttEvent {
     /// 活跃会话的 screen 组装完成,交给 UI 显示。
     ActiveScreen(ScreenImageChunk),
     /// 会话注册表变化:上线(online=true)/下线 LWT(online=false)。
-    Presence { prefix: String, online: bool },
+    Presence {
+        prefix: String,
+        online: bool,
+        list_changed: bool,
+    },
 }
 
 /// vibetty presence 公告。
@@ -245,25 +249,31 @@ impl MqttServer {
                 if data.is_empty() {
                     // LWT:实例下线(空 payload = 删除 retained)
                     log::info!("Session offline (LWT): {topic}");
-                    self.sessions.remove(&topic);
+                    let list_changed = self.sessions.remove(&topic).is_some();
                     if self.active.as_deref() == Some(topic.as_str()) {
                         self.active = None; // flush_pending 会退订 screen
                     }
                     return Some(MqttEvent::Presence {
                         prefix: topic,
                         online: false,
+                        list_changed,
                     });
                 } else {
                     match serde_json::from_slice::<Presence>(&data) {
                         Ok(p) => {
                             // 注册/刷新:保留已存在的 entry(不干扰进行中的重组),只更新元信息。
                             let is_working = p.state == "working";
-                            let s = self.sessions.entry(p.prefix.clone()).or_insert(Session {
-                                client_id: p.client_id.clone(),
-                                ts: p.ts,
-                                title: p.title.clone(),
-                                is_working,
-                            });
+                            let is_new = !self.sessions.contains_key(&p.prefix);
+                            let s =
+                                self.sessions
+                                    .entry(p.prefix.clone())
+                                    .or_insert_with(|| Session {
+                                        client_id: p.client_id.clone(),
+                                        ts: p.ts,
+                                        title: p.title.clone(),
+                                        is_working,
+                                    });
+                            let list_changed = is_new || s.is_working != is_working;
                             s.client_id = p.client_id;
                             s.ts = p.ts;
                             s.title = p.title;
@@ -274,6 +284,7 @@ impl MqttServer {
                             return Some(MqttEvent::Presence {
                                 prefix: p.prefix,
                                 online: true,
+                                list_changed,
                             });
                         }
                         Err(e) => log::warn!("Bad presence JSON: {e}"),

@@ -57,7 +57,7 @@ pub async fn run(
                             let dy = touch.y as i32 - start.y as i32;
                             log::info!("Swipe candidate: dx={} dy={}", dx, dy);
                             if is_back_swipe(start, touch) {
-                                log::info!("Left swipe detected, returning to session list");
+                                log::info!("Right swipe detected, returning to session list");
                                 server.clear_active();
                                 server.flush_pending().await?;
                                 open_session_picker(&mut server, gui, &mut touch_rx).await?;
@@ -108,7 +108,7 @@ async fn handle_mqtt_event(ev: MqttEvent) -> anyhow::Result<()> {
                 Err(e) => log::error!("decode JPEG failed: {e:?}"),
             }
         }
-        MqttEvent::Presence { prefix, online } => {
+        MqttEvent::Presence { prefix, online, .. } => {
             log::info!("Presence: {prefix} online={online}");
         }
     }
@@ -214,12 +214,12 @@ fn is_asr_touch(touch: lcd::TouchPoint) -> bool {
 }
 
 fn is_back_swipe(start: lcd::TouchPoint, end: lcd::TouchPoint) -> bool {
-    const MIN_LEFT_SWIPE_PX: i32 = 80;
+    const MIN_RIGHT_SWIPE_PX: i32 = 80;
     const MAX_VERTICAL_DRIFT_PX: i32 = 80;
 
     let dx = end.x as i32 - start.x as i32;
     let dy = (end.y as i32 - start.y as i32).abs();
-    dx <= -MIN_LEFT_SWIPE_PX && dy <= MAX_VERTICAL_DRIFT_PX
+    dx >= MIN_RIGHT_SWIPE_PX && dy <= MAX_VERTICAL_DRIFT_PX
 }
 
 async fn wait_touch_release(touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>) {
@@ -260,19 +260,11 @@ async fn open_session_picker(
         }
     }
 
-    loop {
-        let labels = server.session_labels();
-        let item_rects = if labels.is_empty() {
-            let _ = gui.show_status("no session", "");
-            Vec::new()
-        } else {
-            let items: Vec<(String, bool)> = labels
-                .iter()
-                .map(|(_, label, _, is_working)| (label.clone(), *is_working))
-                .collect();
-            gui.display_list("Sessions", &items, 0).unwrap_or_default()
-        };
+    let mut labels = Vec::new();
+    let mut item_rects = Vec::new();
+    render_session_picker(server, gui, &mut labels, &mut item_rects);
 
+    loop {
         tokio::select! {
             event = touch_rx.recv() => {
                 if let Some(index) = touched_session_event_index(event, &item_rects) {
@@ -288,12 +280,37 @@ async fn open_session_picker(
             ev = server.recv() => {
                 // 等 presence 更新列表;ActiveScreen 在选择器开着时忽略。
                 match ev {
-                    Some(MqttEvent::Presence { .. }) => continue,
+                    Some(MqttEvent::Presence { list_changed, .. }) => {
+                        if list_changed {
+                            render_session_picker(server, gui, &mut labels, &mut item_rects);
+                        }
+                    }
                     Some(MqttEvent::ActiveScreen(_)) => continue,
                     None => return Ok(()),
                 }
             }
         }
+    }
+}
+
+type SessionLabel = (String, String, bool, bool);
+
+fn render_session_picker(
+    server: &MqttServer,
+    gui: &mut UI,
+    labels: &mut Vec<SessionLabel>,
+    item_rects: &mut Vec<embedded_graphics::primitives::Rectangle>,
+) {
+    *labels = server.session_labels();
+    if labels.is_empty() {
+        let _ = gui.show_status("no session", "");
+        item_rects.clear();
+    } else {
+        let items: Vec<(String, bool)> = labels
+            .iter()
+            .map(|(_, label, _, is_working)| (label.clone(), *is_working))
+            .collect();
+        *item_rects = gui.display_list("Sessions", &items, 0).unwrap_or_default();
     }
 }
 
