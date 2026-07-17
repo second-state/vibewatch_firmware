@@ -433,9 +433,9 @@ impl MqttServer {
         self.active = None;
     }
 
-    /// 注册表上限:超过时丢弃 ts 最旧的会话,防 OOM(注册信息很小,安全兜底)。
+    /// 注册表上限:超过时丢弃 ts 最旧的会话。只保存 presence 元信息,不缓存屏幕。
     fn cap_sessions(&mut self) {
-        const MAX_SESSIONS: usize = 8;
+        const MAX_SESSIONS: usize = 32;
         while self.sessions.len() > MAX_SESSIONS {
             let oldest = self
                 .sessions
