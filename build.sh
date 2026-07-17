@@ -1,97 +1,61 @@
 #!/bin/bash
 
 # Build script for esp32-s3-hello.
-# Usage: ./build.sh {main|ota|main_bin|main_ota_bin|factory|all}
+# Usage: ./build.sh {factory|ota|all}
 #
 # Partition layout in partitions.csv:
-#   nvs   @ 0x9000   - 2M
-#   ota_0 @ 0x210000 - rescue OTA firmware
-#   ota_1 @ 0x410000 - main firmware
+#   nvs      @ 0x9000   - 2M
+#   phy_init @ 0x209000 - 4K
+#   otadata  @ 0x20a000 - 8K
+#   ota_0    @ 0x210000 - 4M rescue/main firmware slot
+#   ota_1    @ 0x610000 - 4M rescue/main firmware slot
 set -euo pipefail
 
 PT=partitions.csv
 TARGET=target/xtensa-esp32s3-espidf/release
 APP_BIN=esp32-s3-hello
-MAIN_IMAGE=./esp32-s3-hello_ota.bin
-MAIN_MERGED=./esp32-s3-hello.bin
-OTA_IMAGE=./ota.bin
+OTA_IMAGE=./esp32-s3-hello_ota.bin
 FACTORY_IMAGE=./esp32-s3-hello_factory.bin
-OTA0_OFFSET=$((0x210000))
 
 build_main() {
   echo "Building main firmware..."
   cargo build --release --bin "$APP_BIN"
 }
 
-build_ota() {
-  echo "Building OTA rescue firmware..."
-  cargo build --release --bin ota
-}
-
-save_main_ota() {
-  espflash save-image --chip esp32s3 --flash-size 16mb --partition-table "$PT" \
-    --target-app-partition ota_1 "$TARGET/$APP_BIN" "$MAIN_IMAGE"
-}
-
-save_main_merged() {
-  espflash save-image --chip esp32s3 --merge --flash-size 16mb --partition-table "$PT" \
-    --target-app-partition ota_1 "$TARGET/$APP_BIN" "$MAIN_MERGED"
-}
-
 save_ota() {
   espflash save-image --chip esp32s3 --flash-size 16mb --partition-table "$PT" \
-    --target-app-partition ota_0 "$TARGET/ota" "$OTA_IMAGE"
+    --target-app-partition ota_1 "$TARGET/$APP_BIN" "$OTA_IMAGE"
+}
+
+save_factory() {
+  espflash save-image --chip esp32s3 --merge --flash-size 16mb --partition-table "$PT" \
+    --target-app-partition ota_0 "$TARGET/$APP_BIN" "$FACTORY_IMAGE"
 }
 
 case "${1:-}" in
-  main)
-    build_main
-    save_main_ota
-    echo "main OTA image: $MAIN_IMAGE"
-    ;;
   ota)
-    build_ota
-    save_ota
-    echo "OTA rescue image: $OTA_IMAGE"
-    ;;
-  main_bin)
     build_main
-    save_main_merged
-    echo "main merged image: $MAIN_MERGED"
-    ;;
-  main_ota_bin)
-    build_main
-    build_ota
-    save_main_merged
     save_ota
-    dd if="$OTA_IMAGE" of="$MAIN_MERGED" bs=1 seek="$OTA0_OFFSET" conv=notrunc
-    echo "main merged image with OTA rescue slot: $MAIN_MERGED"
+    echo "OTA image: $OTA_IMAGE (main firmware for ota_1)"
     ;;
   factory)
     build_main
-    build_ota
-    save_main_merged
-    save_ota
-    cp "$MAIN_MERGED" "$FACTORY_IMAGE"
-    dd if="$OTA_IMAGE" of="$FACTORY_IMAGE" bs=1 seek="$OTA0_OFFSET" conv=notrunc
-    echo "factory image: $FACTORY_IMAGE"
+    save_factory
+    echo "factory image: $FACTORY_IMAGE (main firmware in ota_0; ota_1 left empty)"
     ;;
   all)
     build_main
-    build_ota
-    save_main_ota
+    save_factory
     save_ota
-    echo "main: $MAIN_IMAGE ; ota: $OTA_IMAGE"
+    echo "factory image: $FACTORY_IMAGE (main firmware in ota_0; ota_1 left empty)"
+    echo "OTA image: $OTA_IMAGE (main firmware for ota_1)"
     ;;
   *)
-    echo "Usage: $0 {main|ota|main_bin|main_ota_bin|factory|all}"
+    echo "Usage: $0 {factory|ota|all}"
     echo ""
-    echo "  main         - Build main OTA image for ota_1"
-    echo "  ota          - Build rescue OTA image for ota_0"
-    echo "  main_bin     - Build merged main flash image"
-    echo "  main_ota_bin - Build merged main image and patch ota_0 rescue image into it"
-    echo "  factory      - Build separate factory image containing main + rescue slots"
-    echo "  all          - Build main OTA image and rescue OTA image"
+    echo "  factory - Build merged first-flash image with main firmware in ota_0"
+    echo "  ota     - Build OTA update image with main firmware for ota_1"
+    echo "  all     - Build both factory and OTA images"
     exit 1
     ;;
 esac
