@@ -18,6 +18,115 @@ const GIF_IMG: &[u8] = include_bytes!("../assets/ht.gif");
 const TERMINAL_ANS: &str = include_str!("../../embedded-graphics-terminal/vibetty.ans");
 
 type ColorFormat = Rgb565;
+
+#[derive(Debug, Clone)]
+struct MyTextStyle {
+    font_style: U8g2TextStyle<ColorFormat>,
+    vertical_offset: i32,
+    bg_color: Option<ColorFormat>,
+}
+
+impl embedded_graphics::text::renderer::TextRenderer for MyTextStyle {
+    type Color = ColorFormat;
+
+    fn draw_string<D>(
+        &self,
+        text: &str,
+        mut position: Point,
+        baseline: embedded_graphics::text::Baseline,
+        target: &mut D,
+    ) -> Result<Point, D::Error>
+    where
+        D: DrawTarget<Color = Self::Color>,
+    {
+        position.y += self.vertical_offset;
+        if let Some(bg) = self.bg_color {
+            let text_metrics = self.font_style.measure_string(text, position, baseline);
+            Rectangle::new(
+                position,
+                Size::new(text_metrics.bounding_box.size.width + 1, self.line_height()),
+            )
+            .into_styled(PrimitiveStyleBuilder::new().fill_color(bg).build())
+            .draw(target)?;
+        }
+        self.font_style
+            .draw_string(text, position, baseline, target)
+    }
+
+    fn draw_whitespace<D>(
+        &self,
+        width: u32,
+        mut position: Point,
+        baseline: embedded_graphics::text::Baseline,
+        target: &mut D,
+    ) -> Result<Point, D::Error>
+    where
+        D: DrawTarget<Color = Self::Color>,
+    {
+        position.y += self.vertical_offset;
+        if let Some(bg) = self.bg_color {
+            Rectangle::new(position, Size::new(width, self.line_height()))
+                .into_styled(PrimitiveStyleBuilder::new().fill_color(bg).build())
+                .draw(target)?;
+        }
+        self.font_style
+            .draw_whitespace(width, position, baseline, target)
+    }
+
+    fn measure_string(
+        &self,
+        text: &str,
+        mut position: Point,
+        baseline: embedded_graphics::text::Baseline,
+    ) -> embedded_graphics::text::renderer::TextMetrics {
+        position.y += self.vertical_offset;
+        self.font_style.measure_string(text, position, baseline)
+    }
+
+    fn line_height(&self) -> u32 {
+        self.font_style.line_height()
+    }
+}
+
+impl embedded_graphics::text::renderer::CharacterStyle for MyTextStyle {
+    type Color = ColorFormat;
+
+    fn set_text_color(&mut self, text_color: Option<Self::Color>) {
+        self.font_style
+            .set_text_color(Some(text_color.unwrap_or(ColorFormat::CSS_BLACK)));
+    }
+
+    fn set_background_color(&mut self, background_color: Option<Self::Color>) {
+        self.bg_color = background_color;
+    }
+
+    fn set_underline_color(
+        &mut self,
+        underline_color: embedded_graphics::text::DecorationColor<Self::Color>,
+    ) {
+        self.font_style.set_underline_color(underline_color);
+    }
+
+    fn set_strikethrough_color(
+        &mut self,
+        strikethrough_color: embedded_graphics::text::DecorationColor<Self::Color>,
+    ) {
+        self.font_style.set_strikethrough_color(strikethrough_color);
+    }
+}
+
+fn shifted_text_style(
+    font: impl u8g2_fonts::Font,
+    color: ColorFormat,
+    vertical_offset: i32,
+) -> MyTextStyle {
+    MyTextStyle {
+        font_style: U8g2TextStyle::new(font, color),
+        vertical_offset,
+        bg_color: None,
+    }
+}
+
 type DisplayFramebuffer = Framebuffer<
     ColorFormat,
     RawU16,
@@ -429,6 +538,133 @@ impl UI {
         self.state = state.into();
         self.text = text.into();
         self.display_flush()
+    }
+
+    /// ASR text editor, adapted from vibekeys_firmware's black TUI-style editor.
+    pub fn show_asr_editor(&mut self, text: &str, hint: &str) -> anyhow::Result<()> {
+        let display = self.display.as_mut();
+        display.clear(ColorFormat::CSS_BLACK)?;
+
+        let outer = Rectangle::new(
+            Point::new(2, 2),
+            Size::new(
+                (DISPLAY_WIDTH as u32).saturating_sub(4),
+                (DISPLAY_HEIGHT as u32).saturating_sub(4),
+            ),
+        );
+        outer
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .stroke_color(ColorFormat::CSS_WHITE)
+                    .stroke_width(1)
+                    .build(),
+            )
+            .draw(display)?;
+
+        let top_h = 80;
+        let top_labels = ["Left", "Del", "Right"];
+        for (i, label) in top_labels.iter().enumerate() {
+            let x = (DISPLAY_WIDTH / 3 * i) as i32;
+            let w = if i == 2 {
+                DISPLAY_WIDTH - DISPLAY_WIDTH / 3 * 2
+            } else {
+                DISPLAY_WIDTH / 3
+            };
+            let rect = Rectangle::new(Point::new(x + 6, 10), Size::new(w as u32 - 12, 54));
+            rect.into_styled(
+                PrimitiveStyleBuilder::new()
+                    .stroke_color(ColorFormat::CSS_WHEAT)
+                    .stroke_width(1)
+                    .build(),
+            )
+            .draw(display)?;
+            Text::with_alignment(
+                label,
+                rect.center() + Point::new(0, 6),
+                shifted_text_style(
+                    u8g2_fonts::fonts::u8g2_font_wqy12_t_gb2312a,
+                    ColorFormat::CSS_WHEAT,
+                    3,
+                ),
+                Alignment::Center,
+            )
+            .draw(display)?;
+        }
+
+        let enter_top = DISPLAY_HEIGHT as i32 - 80;
+        let content_rect = Rectangle::new(
+            Point::new(12, top_h),
+            Size::new(
+                (DISPLAY_WIDTH as u32).saturating_sub(24),
+                (enter_top - top_h - 8).max(24) as u32,
+            ),
+        );
+        let content_style = embedded_text::style::TextBoxStyleBuilder::new()
+            .height_mode(embedded_text::style::HeightMode::FitToText)
+            .alignment(embedded_text::alignment::HorizontalAlignment::Left)
+            .line_height(embedded_graphics::text::LineHeight::Pixels(24))
+            .paragraph_spacing(12)
+            .build();
+        TextBox::with_textbox_style(
+            text,
+            content_rect,
+            shifted_text_style(
+                u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
+                ColorFormat::CSS_WHITE,
+                3,
+            ),
+            content_style,
+        )
+        .draw(display)?;
+
+        let record_rect = Rectangle::new(
+            Point::new(12, enter_top + 8),
+            Size::new((DISPLAY_WIDTH as u32).saturating_sub(24), 60),
+        );
+        record_rect
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .stroke_color(ColorFormat::CSS_WHEAT)
+                    .stroke_width(2)
+                    .build(),
+            )
+            .draw(display)?;
+
+        let hint_rect = Rectangle::new(
+            Point::new(12, enter_top + 22),
+            Size::new((DISPLAY_WIDTH as u32).saturating_sub(24), 32),
+        );
+        let hint_style = embedded_text::style::TextBoxStyleBuilder::new()
+            .height_mode(embedded_text::style::HeightMode::FitToText)
+            .alignment(embedded_text::alignment::HorizontalAlignment::Center)
+            .line_height(embedded_graphics::text::LineHeight::Pixels(20))
+            .build();
+        TextBox::with_textbox_style(
+            &format!("Record  {hint}"),
+            hint_rect,
+            shifted_text_style(
+                u8g2_fonts::fonts::u8g2_font_wqy12_t_gb2312a,
+                ColorFormat::CSS_WHEAT,
+                3,
+            ),
+            hint_style,
+        )
+        .draw(display)?;
+
+        for i in 0..5 {
+            let e = crate::lcd::flush_display(
+                self.display.data(),
+                0,
+                0,
+                DISPLAY_WIDTH as i32,
+                DISPLAY_HEIGHT as i32,
+            );
+            if e == 0 {
+                return Ok(());
+            }
+            log::warn!("flush asr editor error: {e} retry {i}");
+        }
+        Err(anyhow::anyhow!("flush asr editor failed"))
     }
 
     // 横向42个字符

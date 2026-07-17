@@ -44,6 +44,7 @@ pub async fn run(
                 match event {
                     Some(lcd::TouchEvent::Press(touch)) if is_asr_touch(touch) => {
                         swipe_start = None;
+                        wait_touch_release(&mut touch_rx).await;
                         run_touch_asr(&mut server, gui, &mut touch_rx, &asr_tx, asr_config).await?;
                     }
                     Some(lcd::TouchEvent::Press(touch)) => {
@@ -126,10 +127,100 @@ async fn run_touch_asr(
     asr_tx: &std::sync::mpsc::Sender<audio::AsrRequest>,
     asr_config: Option<&audio::AsrConfig>,
 ) -> anyhow::Result<()> {
-    let Some(config) = asr_config.cloned() else {
-        let _ = gui.show_status("ASR not configured", "Set asr_config over BLE");
+    let mut editor = TouchAsrEditor::new();
+    let mut hint = "Hold Record";
+    let _ = gui.show_asr_editor(&editor.display_text(), hint);
+
+    let mut press_touch = None;
+    loop {
+        tokio::select! {
+            event = touch_rx.recv() => {
+                match event {
+                    Some(lcd::TouchEvent::Press(touch)) => {
+                        if is_asr_touch(touch) {
+                            hint = match record_asr_once(
+                                server,
+                                gui,
+                                touch_rx,
+                                asr_tx,
+                                asr_config.cloned(),
+                                &editor.display_text(),
+                            )
+                            .await
+                            {
+                                Ok(Some(text)) => {
+                                    let text = text.trim();
+                                    log::info!("Local ASR result: {text}");
+                                    editor.insert_str(&format!("{text} "));
+                                    "Hold Record"
+                                }
+                                Ok(None) => "(empty)",
+                                Err(e) => {
+                                    log::error!("ASR failed: {e:?}");
+                                    "ASR error"
+                                }
+                            };
+                            let _ = gui.show_asr_editor(&editor.display_text(), hint);
+                        } else if let Some(action) = top_asr_action(touch) {
+                            apply_top_asr_action(action, &mut editor);
+                            let _ = gui.show_asr_editor(&editor.display_text(), hint);
+                            wait_top_asr_action(
+                                server,
+                                gui,
+                                touch_rx,
+                                action,
+                                &mut editor,
+                                hint,
+                            )
+                            .await?;
+                        } else if press_touch.is_none() {
+                            press_touch = Some(touch);
+                        }
+                    }
+                    Some(lcd::TouchEvent::Release(touch)) => {
+                        let Some(start) = press_touch.take() else {
+                            continue;
+                        };
+                        match asr_editor_swipe(start, touch) {
+                            Some(AsrEditorSwipe::Send) => {
+                                let text = editor.take_trimmed();
+                                if !text.is_empty() {
+                                    server.send(protocol::ClientMessage::Input(text)).await?;
+                                }
+                                server.send(protocol::ClientMessage::sync()).await?;
+                                return Ok(());
+                            }
+                            Some(AsrEditorSwipe::Cancel) => {
+                                log::info!("ASR editor canceled");
+                                server.send(protocol::ClientMessage::sync()).await?;
+                                return Ok(());
+                            }
+                            None => {}
+                        }
+                    }
+                    None => return Err(anyhow::anyhow!("touch event source closed during ASR editor")),
+                }
+            }
+            ev = server.recv() => {
+                if ev.is_none() {
+                    return Err(anyhow::anyhow!("MQTT event source closed during ASR editor"));
+                }
+            }
+        }
+    }
+}
+
+async fn record_asr_once(
+    server: &mut MqttServer,
+    gui: &mut UI,
+    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    asr_tx: &std::sync::mpsc::Sender<audio::AsrRequest>,
+    asr_config: Option<audio::AsrConfig>,
+    display_text: &str,
+) -> anyhow::Result<Option<String>> {
+    let Some(config) = asr_config else {
         wait_touch_release(touch_rx).await;
-        return Ok(());
+        return Err(anyhow::anyhow!("ASR not configured"));
     };
 
     let (respond, result) = tokio::sync::oneshot::channel();
@@ -140,11 +231,11 @@ async fn run_touch_asr(
         respond,
     };
 
-    let _ = gui.show_status("Listening...", "Release to stop");
+    let _ = gui.show_asr_editor(display_text, "Listening...");
 
     if asr_tx.send(req).is_err() {
-        let _ = gui.show_status("ASR unavailable", "");
-        return Ok(());
+        wait_touch_release(touch_rx).await;
+        return Err(anyhow::anyhow!("ASR unavailable"));
     }
 
     let mut result = std::pin::pin!(result);
@@ -154,8 +245,11 @@ async fn run_touch_asr(
                 break response.unwrap_or_else(|_| Err(anyhow::anyhow!("ASR worker dropped request")));
             }
             event = touch_rx.recv() => {
-                if !update_asr_touch_pressed(event) {
-                    cancel.store(true, Ordering::Relaxed);
+                match event {
+                    Some(lcd::TouchEvent::Press(touch)) if is_asr_touch(touch) => {}
+                    Some(lcd::TouchEvent::Release(_)) | Some(lcd::TouchEvent::Press(_)) | None => {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
                 }
             }
             ev = server.recv() => {
@@ -167,48 +261,167 @@ async fn run_touch_asr(
     };
 
     match asr_result {
-        Ok(text) if !text.trim().is_empty() => {
-            let text = text.trim().to_string();
-            log::info!("Local ASR result: {text}");
-            let _ = gui.show_status("Sending ASR", text.clone());
-            server.send(protocol::ClientMessage::Input(text)).await?;
-            server.send(protocol::ClientMessage::sync()).await?;
-        }
-        Ok(_) => {
-            let _ = gui.show_status("ASR empty", "Tap to return");
-            wait_touch_press(touch_rx).await;
-            wait_touch_release(touch_rx).await;
-            server.send(protocol::ClientMessage::sync()).await?;
-        }
-        Err(e) => {
-            log::error!("ASR failed: {e:?}");
-            let _ = gui.show_status("ASR failed", format!("{e:?}"));
+        Ok(text) if !text.trim().is_empty() => Ok(Some(text.trim().to_string())),
+        Ok(_) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TopAsrAction {
+    Left,
+    Delete,
+    Right,
+}
+
+enum AsrEditorSwipe {
+    Send,
+    Cancel,
+}
+
+struct TouchAsrEditor {
+    text: String,
+    cursor: usize,
+}
+
+impl TouchAsrEditor {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            cursor: 0,
         }
     }
 
-    Ok(())
+    fn insert_str(&mut self, s: &str) {
+        let byte_pos = self.cursor_byte_pos();
+        self.text.insert_str(byte_pos, s);
+        self.cursor += s.chars().count();
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let byte_pos = self
+            .text
+            .char_indices()
+            .nth(self.cursor - 1)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        self.text.remove(byte_pos);
+        self.cursor -= 1;
+    }
+
+    fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    fn move_right(&mut self) {
+        self.cursor = self.cursor.saturating_add(1).min(self.char_len());
+    }
+
+    fn display_text(&self) -> String {
+        let mut out = String::with_capacity(self.text.len() + 1);
+        for (i, ch) in self.text.chars().enumerate() {
+            if i == self.cursor {
+                out.push('|');
+            }
+            out.push(ch);
+        }
+        if self.cursor >= self.char_len() {
+            out.push('|');
+        }
+        out
+    }
+
+    fn take_trimmed(mut self) -> String {
+        self.text.truncate(self.text.trim_end().len());
+        self.text.trim_start().to_string()
+    }
+
+    fn char_len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    fn cursor_byte_pos(&self) -> usize {
+        self.text
+            .char_indices()
+            .nth(self.cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(self.text.len())
+    }
 }
 
-async fn wait_touch_press(touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>) {
+async fn wait_top_asr_action(
+    server: &mut MqttServer,
+    gui: &mut UI,
+    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    action: TopAsrAction,
+    editor: &mut TouchAsrEditor,
+    hint: &str,
+) -> anyhow::Result<()> {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(180));
+    interval.tick().await;
     loop {
         tokio::select! {
+            _ = interval.tick() => {
+                apply_top_asr_action(action, editor);
+                let _ = gui.show_asr_editor(&editor.display_text(), hint);
+            }
             event = touch_rx.recv() => {
                 match event {
-                    Some(lcd::TouchEvent::Press(_)) | None => break,
-                    Some(lcd::TouchEvent::Release(_)) => {}
+                    Some(lcd::TouchEvent::Release(_)) | None => return Ok(()),
+                    Some(lcd::TouchEvent::Press(_)) => {}
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
-                break;
+            ev = server.recv() => {
+                if ev.is_none() {
+                    return Err(anyhow::anyhow!("MQTT event source closed during ASR top action"));
+                }
             }
         }
     }
 }
 
-fn update_asr_touch_pressed(event: Option<lcd::TouchEvent>) -> bool {
-    match event {
-        Some(lcd::TouchEvent::Press(touch)) => is_asr_touch(touch),
-        Some(lcd::TouchEvent::Release(_)) | None => false,
+fn apply_top_asr_action(action: TopAsrAction, editor: &mut TouchAsrEditor) {
+    match action {
+        TopAsrAction::Left => editor.move_left(),
+        TopAsrAction::Delete => editor.backspace(),
+        TopAsrAction::Right => editor.move_right(),
+    }
+}
+
+fn top_asr_action(touch: lcd::TouchPoint) -> Option<TopAsrAction> {
+    if touch.y >= 80 {
+        return None;
+    }
+    let third = lcd::LCD_WIDTH / 3;
+    if touch.x < third {
+        Some(TopAsrAction::Left)
+    } else if touch.x < third * 2 {
+        Some(TopAsrAction::Delete)
+    } else {
+        Some(TopAsrAction::Right)
+    }
+}
+
+fn asr_editor_swipe(start: lcd::TouchPoint, end: lcd::TouchPoint) -> Option<AsrEditorSwipe> {
+    const MIN_VERTICAL_SWIPE_PX: i32 = 80;
+    const MAX_HORIZONTAL_DRIFT_PX: i32 = 100;
+
+    if is_asr_touch(start) || top_asr_action(start).is_some() {
+        return None;
+    }
+
+    let dx = (end.x as i32 - start.x as i32).abs();
+    let dy = end.y as i32 - start.y as i32;
+    if dx > MAX_HORIZONTAL_DRIFT_PX || dy.abs() < MIN_VERTICAL_SWIPE_PX {
+        return None;
+    }
+    if dy < 0 {
+        Some(AsrEditorSwipe::Send)
+    } else {
+        Some(AsrEditorSwipe::Cancel)
     }
 }
 
