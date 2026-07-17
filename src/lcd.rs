@@ -91,13 +91,20 @@ pub fn start_touch_worker(tx: tokio::sync::mpsc::Sender<TouchEvent>) -> anyhow::
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
                     None => {
-                        if logged_press {
-                            log::info!("Touch released");
-                        }
                         if let Some(touch) = last_touch {
+                            if logged_press {
+                                log::info!(
+                                    "Touch released: x={} y={} strength={}",
+                                    touch.x,
+                                    touch.y,
+                                    touch.strength
+                                );
+                            }
                             if tx.try_send(TouchEvent::Release(touch)).is_err() {
                                 return;
                             }
+                        } else if logged_press {
+                            log::info!("Touch released");
                         }
                         break;
                     }

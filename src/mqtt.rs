@@ -418,6 +418,10 @@ impl MqttServer {
         }
     }
 
+    pub fn clear_active(&mut self) {
+        self.active = None;
+    }
+
     /// 注册表上限:超过时丢弃 ts 最旧的会话,防 OOM(注册信息很小,安全兜底)。
     fn cap_sessions(&mut self) {
         const MAX_SESSIONS: usize = 8;

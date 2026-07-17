@@ -33,6 +33,7 @@ pub async fn run(
     // session list:触摸选择会话。
     open_session_picker(&mut server, gui, &mut touch_rx).await?;
 
+    let mut swipe_start = None;
     // 选定会话后:主循环,解码并刷屏
     loop {
         // 把活跃会话落实为 `{prefix}/screen` 订阅(不可被取消)。
@@ -42,9 +43,27 @@ pub async fn run(
             event = touch_rx.recv() => {
                 match event {
                     Some(lcd::TouchEvent::Press(touch)) if is_asr_touch(touch) => {
+                        swipe_start = None;
                         run_touch_asr(&mut server, gui, &mut touch_rx, &asr_tx, asr_config).await?;
                     }
-                    Some(_) => {}
+                    Some(lcd::TouchEvent::Press(touch)) => {
+                        if swipe_start.is_none() {
+                            swipe_start = Some(touch);
+                        }
+                    }
+                    Some(lcd::TouchEvent::Release(touch)) => {
+                        if let Some(start) = swipe_start.take() {
+                            let dx = touch.x as i32 - start.x as i32;
+                            let dy = touch.y as i32 - start.y as i32;
+                            log::info!("Swipe candidate: dx={} dy={}", dx, dy);
+                            if is_back_swipe(start, touch) {
+                                log::info!("Left swipe detected, returning to session list");
+                                server.clear_active();
+                                server.flush_pending().await?;
+                                open_session_picker(&mut server, gui, &mut touch_rx).await?;
+                            }
+                        }
+                    }
                     None => {
                         log::warn!("Touch event source closed, exiting remote loop");
                         break;
@@ -153,7 +172,10 @@ async fn run_touch_asr(
             server.send(protocol::ClientMessage::sync()).await?;
         }
         Ok(_) => {
-            let _ = gui.show_status("ASR empty", "");
+            let _ = gui.show_status("ASR empty", "Tap to return");
+            wait_touch_press(touch_rx).await;
+            wait_touch_release(touch_rx).await;
+            server.send(protocol::ClientMessage::sync()).await?;
         }
         Err(e) => {
             log::error!("ASR failed: {e:?}");
@@ -162,6 +184,22 @@ async fn run_touch_asr(
     }
 
     Ok(())
+}
+
+async fn wait_touch_press(touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>) {
+    loop {
+        tokio::select! {
+            event = touch_rx.recv() => {
+                match event {
+                    Some(lcd::TouchEvent::Press(_)) | None => break,
+                    Some(lcd::TouchEvent::Release(_)) => {}
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                break;
+            }
+        }
+    }
 }
 
 fn update_asr_touch_pressed(event: Option<lcd::TouchEvent>) -> bool {
@@ -175,12 +213,23 @@ fn is_asr_touch(touch: lcd::TouchPoint) -> bool {
     touch.y > lcd::LCD_HEIGHT.saturating_sub(80)
 }
 
+fn is_back_swipe(start: lcd::TouchPoint, end: lcd::TouchPoint) -> bool {
+    const MIN_LEFT_SWIPE_PX: i32 = 80;
+    const MAX_VERTICAL_DRIFT_PX: i32 = 80;
+
+    let dx = end.x as i32 - start.x as i32;
+    let dy = (end.y as i32 - start.y as i32).abs();
+    dx <= -MIN_LEFT_SWIPE_PX && dy <= MAX_VERTICAL_DRIFT_PX
+}
+
 async fn wait_touch_release(touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>) {
-    let mut pressed = true;
-    while pressed {
+    loop {
         tokio::select! {
             event = touch_rx.recv() => {
-                pressed = update_asr_touch_pressed(event);
+                match event {
+                    Some(lcd::TouchEvent::Release(_)) | None => break,
+                    Some(lcd::TouchEvent::Press(_)) => {}
+                }
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
                 break;
