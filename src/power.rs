@@ -24,12 +24,7 @@ pub fn start_power_key_worker() {
         .spawn(|| loop {
             if unsafe { board_pmu_take_pkey_long_press() } {
                 log::warn!("PWR key long-press detected, shutting down");
-                let _ = crate::lcd::set_backlight(0);
-                let err = unsafe { board_pmu_shutdown() };
-                if err != esp_idf_svc::sys::ESP_OK as i32 {
-                    log::error!("board_pmu_shutdown failed: esp_err_t={err}");
-                }
-
+                shutdown();
                 loop {
                     std::thread::sleep(Duration::from_secs(60));
                 }
@@ -39,6 +34,15 @@ pub fn start_power_key_worker() {
     {
         POWER_WORKER_STARTED.store(false, Ordering::SeqCst);
         log::error!("Failed to spawn power key worker: {e:?}");
+    }
+}
+
+pub fn shutdown() {
+    log::warn!("Power shutdown requested");
+    let _ = crate::lcd::set_backlight(0);
+    let err = unsafe { board_pmu_shutdown() };
+    if err != esp_idf_svc::sys::ESP_OK as i32 {
+        log::error!("board_pmu_shutdown failed: esp_err_t={err}");
     }
 }
 

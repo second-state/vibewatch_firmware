@@ -2,6 +2,7 @@ use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::reset::restart};
 
 mod audio;
 mod ble_provision;
+mod boot;
 mod lcd;
 mod mqtt;
 mod network;
@@ -35,6 +36,7 @@ fn main() -> anyhow::Result<()> {
     lcd::touch_init()?;
     let (touch_tx, mut touch_rx) = tokio::sync::mpsc::channel::<lcd::TouchEvent>(16);
     lcd::start_touch_worker(touch_tx)?;
+    let boot_button = boot::new_boot_button(peripherals.pins.gpio0.into())?;
     lcd::set_backlight(30)?;
     power::init()?;
     power::start_power_key_worker();
@@ -141,6 +143,7 @@ fn main() -> anyhow::Result<()> {
         client_id,
         &mut gui,
         touch_rx,
+        boot_button,
         asr_tx,
         asr_config.as_ref(),
     ));

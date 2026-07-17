@@ -156,6 +156,25 @@ impl FastFramebuffer {
         self.inner.as_image()
     }
 
+    fn rect_data(&self, rect: Rectangle) -> Option<(Vec<u8>, Rectangle)> {
+        let rect = rect.intersection(&self.bounding_box());
+        if rect.size.width == 0 || rect.size.height == 0 {
+            return None;
+        }
+
+        let x = rect.top_left.x.max(0) as usize;
+        let y = rect.top_left.y.max(0) as usize;
+        let width = rect.size.width as usize;
+        let height = rect.size.height as usize;
+        let mut out = Vec::with_capacity(width * height * 2);
+        let data = self.inner.data();
+        for row in y..(y + height) {
+            let start = (row * DISPLAY_WIDTH + x) * 2;
+            out.extend_from_slice(&data[start..start + width * 2]);
+        }
+        Some((out, rect))
+    }
+
     fn set_pixel_fast(&mut self, p: Point, color: ColorFormat) {
         if p.x < 0 || p.y < 0 {
             return;
@@ -343,10 +362,32 @@ pub fn render_terminal_ans_demo() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn new_terminal_renderer() -> embedded_graphics_terminal::TerminalRenderer {
+    use embedded_graphics_terminal::TerminalRenderer;
+    use u8g2_fonts::fonts::{
+        u8g2_font_unifont_t_78_79, u8g2_font_unifont_t_gb2312, u8g2_font_unifont_t_symbols,
+    };
+
+    TerminalRenderer::new(
+        Size::new(DISPLAY_WIDTH as u32, DISPLAY_HEIGHT as u32),
+        u8g2_font_unifont_t_gb2312,
+        ColorFormat::WHITE,
+        ColorFormat::BLACK,
+    )
+    .with_fallback_font(u8g2_font_unifont_t_symbols)
+    .with_fallback_font(u8g2_font_unifont_t_78_79)
+}
+
+pub fn terminal_text_cells() -> (u16, u16) {
+    let renderer = new_terminal_renderer();
+    (renderer.cols() as u16, renderer.rows() as u16)
+}
+
 const ALPHA: f32 = 0.5;
 const MENU_ITEM_H: u16 = 66;
 const MENU_START_Y: u16 = 30;
 const MENU_FONT_H: u16 = 17;
+const TERMINAL_SCROLLBACK_ROWS: usize = 64;
 
 #[derive(Clone)]
 pub struct ListItem {
@@ -382,6 +423,11 @@ pub enum SettingMenuSelection {
     Back,
 }
 
+pub enum TerminalScroll {
+    Up,
+    Down,
+}
+
 pub struct UI {
     state: String,
     state_area: Rectangle,
@@ -391,6 +437,8 @@ pub struct UI {
     text_background: Vec<Pixel<ColorFormat>>,
 
     display: Box<FastFramebuffer>,
+    terminal_parser: Option<vt100::Parser>,
+    terminal_renderer: Option<embedded_graphics_terminal::TerminalRenderer>,
 }
 
 const DISPLAY_WIDTH: usize = crate::lcd::LCD_WIDTH as usize;
@@ -434,7 +482,7 @@ pub async fn select_menu_item(
     title: &str,
     items: &[(String, bool)],
 ) -> anyhow::Result<usize> {
-    let item_rects = gui.display_menu_list(title, items, 0)?;
+    let item_rects = gui.display_menu_list(title, items)?;
     log::info!("{title}: waiting for touch selection");
 
     let mut press_index = None;
@@ -540,6 +588,8 @@ impl Default for UI {
             text: String::new(),
             text_background: box_pixels,
             display,
+            terminal_parser: None,
+            terminal_renderer: None,
             state_area,
             text_area,
         }
@@ -692,6 +742,125 @@ impl UI {
         Err(anyhow::anyhow!("flush asr editor failed"))
     }
 
+    fn flush_terminal_dirty(&self, rect: Rectangle) -> anyhow::Result<Option<i64>> {
+        let Some((data, rect)) = self.display.rect_data(rect) else {
+            return Ok(None);
+        };
+
+        let flush_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+        for i in 0..5 {
+            let e = crate::lcd::flush_display(
+                &data,
+                rect.top_left.x,
+                rect.top_left.y,
+                rect.top_left.x + rect.size.width as i32,
+                rect.top_left.y + rect.size.height as i32,
+            );
+            if e == 0 {
+                let flush_elapsed_us =
+                    unsafe { esp_idf_svc::sys::esp_timer_get_time() } - flush_start_us;
+                return Ok(Some(flush_elapsed_us));
+            }
+            log::warn!("flush terminal dirty rect error: {e} retry {i}");
+        }
+        Err(anyhow::anyhow!("flush terminal dirty rect failed"))
+    }
+
+    pub fn show_terminal_text_frame(&mut self, payload: &[u8]) -> anyhow::Result<()> {
+        let Some((&tag, bytes)) = payload.split_first() else {
+            log::warn!("empty screen_text frame");
+            return Ok(());
+        };
+        let (cols, rows) = terminal_text_cells();
+        match tag {
+            0x00 => {
+                log::info!("screen_text full frame: {}B", bytes.len());
+                self.terminal_parser =
+                    Some(vt100::Parser::new(rows, cols, TERMINAL_SCROLLBACK_ROWS));
+                if let Some(renderer) = self.terminal_renderer.as_mut() {
+                    renderer.invalidate();
+                }
+            }
+            0x01 => {
+                log::debug!("screen_text delta frame: {}B", bytes.len());
+                if self.terminal_parser.is_none() {
+                    log::warn!("screen_text delta before full frame; creating blank terminal");
+                    self.terminal_parser =
+                        Some(vt100::Parser::new(rows, cols, TERMINAL_SCROLLBACK_ROWS));
+                    if let Some(renderer) = self.terminal_renderer.as_mut() {
+                        renderer.invalidate();
+                    }
+                }
+            }
+            other => {
+                log::warn!("unknown screen_text tag: {other}");
+                return Ok(());
+            }
+        }
+
+        let parse_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+        if let Some(parser) = self.terminal_parser.as_mut() {
+            parser.process(bytes);
+        }
+        let parse_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - parse_start_us;
+
+        let mut renderer = self
+            .terminal_renderer
+            .take()
+            .unwrap_or_else(new_terminal_renderer);
+        let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+        let dirty = match self.terminal_parser.as_ref() {
+            Some(parser) => renderer.render_diff(parser.screen(), self.display.as_mut())?,
+            None => None,
+        };
+        let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
+        self.terminal_renderer = Some(renderer);
+
+        let flush_elapsed_us = match dirty {
+            Some(rect) => self.flush_terminal_dirty(rect)?.unwrap_or(0),
+            None => 0,
+        };
+        log::info!(
+            "screen_text frame tag=0x{tag:02x} bytes={} parse={:.2}ms render={:.2}ms flush={:.2}ms dirty={:?}",
+            bytes.len(),
+            parse_elapsed_us as f32 / 1000.0,
+            render_elapsed_us as f32 / 1000.0,
+            flush_elapsed_us as f32 / 1000.0,
+            dirty
+        );
+        Ok(())
+    }
+
+    pub fn scroll_terminal_text(&mut self, direction: TerminalScroll) -> anyhow::Result<bool> {
+        let Some(parser) = self.terminal_parser.as_mut() else {
+            return Ok(false);
+        };
+        let before = parser.screen().scrollback();
+        let (rows, _) = parser.screen().size();
+        let page_rows = usize::from(rows.saturating_sub(2).max(1));
+        let next = match direction {
+            TerminalScroll::Up => before.saturating_add(page_rows),
+            TerminalScroll::Down => before.saturating_sub(page_rows),
+        };
+        parser.screen_mut().set_scrollback(next);
+        let after = parser.screen().scrollback();
+        if after == before {
+            return Ok(false);
+        }
+
+        log::info!("local text scroll: {before} -> {after}");
+        let mut renderer = self
+            .terminal_renderer
+            .take()
+            .unwrap_or_else(new_terminal_renderer);
+        let dirty = renderer.render_diff(parser.screen(), self.display.as_mut())?;
+        self.terminal_renderer = Some(renderer);
+        if let Some(rect) = dirty {
+            let _ = self.flush_terminal_dirty(rect)?;
+        }
+        Ok(true)
+    }
+
     // 横向42个字符
     fn display_flush(&mut self) -> anyhow::Result<()> {
         let image = tinygif::Gif::<ColorFormat>::from_slice(GIF_IMG).unwrap();
@@ -781,17 +950,13 @@ impl UI {
             }
 
             item_rects.push(item.rect);
+            let mut style = PrimitiveStyleBuilder::new()
+                .stroke_color(item.bg_color.unwrap_or(ColorFormat::CSS_DARK_GRAY))
+                .stroke_width(1);
             if let Some(bg_color) = item.bg_color {
-                item.rect
-                    .into_styled(
-                        PrimitiveStyleBuilder::new()
-                            .fill_color(bg_color)
-                            .stroke_color(bg_color)
-                            .stroke_width(1)
-                            .build(),
-                    )
-                    .draw(display)?;
+                style = style.fill_color(bg_color);
             }
+            item.rect.into_styled(style.build()).draw(display)?;
             if let Some(fg_color) = item.fg_color {
                 let text_y =
                     item.rect.top_left.y + (item.rect.size.height as i32 + MENU_FONT_H as i32) / 2;
@@ -833,7 +998,6 @@ impl UI {
         &mut self,
         title: &str,
         items: &[(String, bool)],
-        focus: usize,
     ) -> anyhow::Result<Vec<Rectangle>> {
         let list_items: Vec<ListItem> = items
             .iter()
@@ -848,13 +1012,12 @@ impl UI {
                     Point::new(0, item_top),
                     Size::new(DISPLAY_WIDTH as u32, MENU_ITEM_H as u32),
                 );
-                let bg_color = (i == focus).then_some(ColorFormat::CSS_DARK_BLUE);
                 let fg_color = if *is_working {
-                    ColorFormat::CSS_WHITE
+                    ColorFormat::CSS_DARK_BLUE
                 } else {
                     ColorFormat::CSS_DARK_ORANGE
                 };
-                Some(ListItem::new(rect, label.clone(), bg_color, Some(fg_color)))
+                Some(ListItem::new(rect, label.clone(), None, Some(fg_color)))
             })
             .collect();
 

@@ -13,10 +13,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
-    /// Sync:客户端声明自己显示区的【像素】尺寸 `width`/`height`,
-    /// 服务端按 char cell 尺寸换算成列/行后 resize PTY,并回送整张屏幕。
+    /// Sync:客户端声明自己显示区尺寸。`pixels=true`(默认)时是像素;
+    /// `pixels=false` 时 width/height 是字符列/行。`close=true` 暂停服务端主动推屏。
     #[serde(rename = "sync")]
-    Sync { width: u16, height: u16 },
+    Sync {
+        width: u16,
+        height: u16,
+        #[serde(default = "default_sync_pixels")]
+        pixels: bool,
+        #[serde(default)]
+        close: bool,
+    },
 
     /// PTY 输入（键盘输入发送到终端）
     #[serde(rename = "pty_in")]
@@ -44,10 +51,17 @@ pub enum ClientMessage {
 impl Debug for ClientMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClientMessage::Sync { width, height } => f
+            ClientMessage::Sync {
+                width,
+                height,
+                pixels,
+                close,
+            } => f
                 .debug_struct("Sync")
                 .field("width", width)
                 .field("height", height)
+                .field("pixels", pixels)
+                .field("close", close)
                 .finish(),
             ClientMessage::PtyInput(data) => f
                 .debug_tuple("PtyInput")
@@ -60,10 +74,14 @@ impl Debug for ClientMessage {
     }
 }
 
+fn default_sync_pixels() -> bool {
+    true
+}
+
 // ========== 设备本地类型（非线路协议）==========
 //
-// 入站只有两种 payload:`{prefix}/pty_out` 和 `{prefix}/screen` 都是 raw 字节,
-// 设备不反序列化任何 ServerMessage 枚举。下面是设备内部用来承载一帧屏幕图的本地结构。
+// 入站 screen/screen_text 都是 raw 字节,设备不反序列化任何 ServerMessage 枚举。
+// 下面是设备内部用来承载一帧屏幕图的本地结构。
 
 /// 一帧屏幕图片(设备本地重组后的载体,不走 serde 线路序列化)。
 #[derive(Debug, Clone)]
@@ -108,9 +126,24 @@ impl ClientMessage {
     /// 构造一帧 Sync:声明设备显示区像素尺寸。
     /// 声明不超过物理屏幕、且最接近物理屏幕的 8 像素对齐尺寸。
     pub fn sync() -> Self {
+        Self::sync_with_close(false)
+    }
+
+    pub fn sync_with_close(close: bool) -> Self {
         Self::Sync {
             width: 408,
             height: 496,
+            pixels: true,
+            close,
+        }
+    }
+
+    pub fn sync_cells(cols: u16, rows: u16, close: bool) -> Self {
+        Self::Sync {
+            width: cols,
+            height: rows,
+            pixels: false,
+            close,
         }
     }
 
@@ -159,7 +192,53 @@ mod tests {
     fn test_client_sync_json() {
         let json = ClientMessage::sync().to_json().unwrap();
         match ClientMessage::from_json(&json).unwrap() {
-            ClientMessage::Sync { width, height } => assert_eq!((width, height), (408, 496)),
+            ClientMessage::Sync {
+                width,
+                height,
+                pixels,
+                close,
+            } => {
+                assert_eq!((width, height), (408, 496));
+                assert!(pixels);
+                assert!(!close);
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_client_sync_defaults_json() {
+        match ClientMessage::from_json(r#"{"type":"sync","data":{"width":80,"height":24}}"#)
+            .unwrap()
+        {
+            ClientMessage::Sync {
+                width,
+                height,
+                pixels,
+                close,
+            } => {
+                assert_eq!((width, height), (80, 24));
+                assert!(pixels);
+                assert!(!close);
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_client_sync_cells_json() {
+        let json = ClientMessage::sync_cells(51, 29, false).to_json().unwrap();
+        match ClientMessage::from_json(&json).unwrap() {
+            ClientMessage::Sync {
+                width,
+                height,
+                pixels,
+                close,
+            } => {
+                assert_eq!((width, height), (51, 29));
+                assert!(!pixels);
+                assert!(!close);
+            }
             _ => panic!("Wrong message type"),
         }
     }

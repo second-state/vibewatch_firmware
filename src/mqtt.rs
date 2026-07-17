@@ -48,8 +48,8 @@ pub struct MqttServer {
     /// 用户选定的活跃会话(= screen 订阅目标 = input 发送目标)。
     /// 当前无活跃时,首个注册会话自动激活;此后不再自动切换。
     active: Option<String>,
-    /// 已落实 screen 订阅的实例 prefix(flush_pending 维护)。
-    subscribed_prefix: Option<String>,
+    /// 已落实 screen/screen_text 订阅的 topic(flush_pending 维护)。
+    subscribed_screen_topic: Option<String>,
     /// screen 分片重组缓冲,key = topic。
     reassembly: HashMap<String, Vec<u8>>,
 }
@@ -62,12 +62,16 @@ struct Session {
     title: String,
     /// agent 是否在工作中(state=="working");waiting 时为 false。
     is_working: bool,
+    /// 服务端屏幕格式。text 走 /screen_text;其它值走 /screen。
+    format: ScreenFormat,
 }
 
 /// `recv()` 上报给 app 的事件。
 pub enum MqttEvent {
     /// 活跃会话的 screen 组装完成,交给 UI 显示。
     ActiveScreen(ScreenImageChunk),
+    /// 活跃会话的 screen_text:首字节 tag + ANSI 终端流。
+    ActiveText(Vec<u8>),
     /// 会话注册表变化:上线(online=true)/下线 LWT(online=false)。
     Presence {
         prefix: String,
@@ -89,10 +93,37 @@ struct Presence {
     /// 旧端不发时 default "working"(与 vibetty 初始状态一致)。
     #[serde(default = "default_state_working")]
     state: String,
+    /// "high" / "medium" / "low" = JPEG screen;"text" = screen_text。
+    #[serde(default)]
+    format: ScreenFormat,
 }
 
 fn default_state_working() -> String {
     "working".to_string()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ScreenFormat {
+    High,
+    Medium,
+    Low,
+    Text,
+}
+
+impl Default for ScreenFormat {
+    fn default() -> Self {
+        Self::High
+    }
+}
+
+impl ScreenFormat {
+    fn screen_suffix(self) -> &'static str {
+        match self {
+            Self::Text => "screen_text",
+            Self::High | Self::Medium | Self::Low => "screen",
+        }
+    }
 }
 
 /// session 列表单行字符上限。取 15:最坏全角中文 15×12px=180px,默认屏(284)/max2(320)都单行不溢出。
@@ -198,7 +229,7 @@ impl MqttServer {
             rx,
             sessions: HashMap::new(),
             active: None,
-            subscribed_prefix: None,
+            subscribed_screen_topic: None,
             reassembly: HashMap::new(),
         })
     }
@@ -206,24 +237,29 @@ impl MqttServer {
     /// 把 `active` 落实为 screen 订阅。回调式客户端下 subscribe/unsubscribe 是同步调用,
     /// 不再需要像旧 async 客户端那样并发排水 conn 事件。
     pub async fn flush_pending(&mut self) -> anyhow::Result<()> {
-        if self.active == self.subscribed_prefix {
+        let next_topic = self.active.as_ref().and_then(|prefix| {
+            self.sessions
+                .get(prefix)
+                .map(|s| format!("{prefix}/{}", s.format.screen_suffix()))
+        });
+        if next_topic == self.subscribed_screen_topic {
             return Ok(());
         }
 
-        // 先退订旧活跃会话的 screen
-        if let Some(old) = self.subscribed_prefix.take() {
-            log::info!("Unsubscribing old session screen: {old}");
-            let _ = self.client.unsubscribe(&format!("{old}/screen"));
+        // 先退订旧活跃会话的 screen/screen_text
+        if let Some(old_topic) = self.subscribed_screen_topic.take() {
+            log::info!("Unsubscribing old session screen topic: {old_topic}");
+            let _ = self.client.unsubscribe(&old_topic);
             self.reassembly.clear();
         }
 
-        // 再订阅新活跃会话的 screen
-        if let Some(new) = self.active.clone() {
-            log::info!("Subscribing session screen: {new}");
+        // 再订阅新活跃会话的 screen/screen_text
+        if let Some(new_topic) = next_topic {
+            log::info!("Subscribing session screen topic: {new_topic}");
             self.client
-                .subscribe(&format!("{new}/screen"), QoS::AtMostOnce)
+                .subscribe(&new_topic, QoS::AtMostOnce)
                 .map_err(|e| anyhow::anyhow!("subscribe screen failed: {e:?}"))?;
-            self.subscribed_prefix = Some(new);
+            self.subscribed_screen_topic = Some(new_topic);
         }
 
         Ok(())
@@ -272,12 +308,14 @@ impl MqttServer {
                                         ts: p.ts,
                                         title: p.title.clone(),
                                         is_working,
+                                        format: p.format,
                                     });
                             let list_changed = is_new || s.is_working != is_working;
                             s.client_id = p.client_id;
                             s.ts = p.ts;
                             s.title = p.title;
                             s.is_working = is_working;
+                            s.format = p.format;
                             self.cap_sessions();
 
                             // 不自动激活:由 session list picker 选定后 set_active。
@@ -291,6 +329,11 @@ impl MqttServer {
                     }
                 }
                 continue;
+            }
+
+            // screen_text:首字节 tag(0x00 全屏基线,0x01 PTY 增量),后续是 ANSI 字节流。
+            if topic.ends_with("/screen_text") {
+                return Some(MqttEvent::ActiveText(data));
             }
 
             // screen:只订阅了活跃会话,组装完成的必是活跃帧。
@@ -431,6 +474,13 @@ impl MqttServer {
 
     pub fn clear_active(&mut self) {
         self.active = None;
+    }
+
+    pub fn active_uses_text_screen(&self) -> bool {
+        self.active
+            .as_ref()
+            .and_then(|prefix| self.sessions.get(prefix))
+            .is_some_and(|s| s.format == ScreenFormat::Text)
     }
 
     /// 注册表上限:超过时丢弃 ts 最旧的会话。只保存 presence 元信息,不缓存屏幕。
