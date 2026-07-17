@@ -301,7 +301,7 @@ async fn show_screen_action_menu(
         }
         ScreenAction::Next => {
             server
-                .send(protocol::ClientMessage::pty_input_str("\t"))
+                .send(protocol::ClientMessage::pty_input_str("\x1b[B"))
                 .await?
         }
         ScreenAction::Yolo => {
