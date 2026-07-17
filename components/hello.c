@@ -26,9 +26,11 @@ static bool microphone_opened = false;
 #define BOARD_AUDIO_CHANNELS (1)
 
 #define AXP2101_I2C_ADDR (0x34)
+#define AXP2101_STATUS1 (0x00)
 #define AXP2101_COMMON_CONFIG (0x10)
 #define AXP2101_INTEN2 (0x41)
 #define AXP2101_INTSTS2 (0x49)
+#define AXP2101_BAT_PERCENT_DATA (0xA4)
 #define AXP2101_PKEY_LONG_IRQ_MASK (1 << 2)
 
 esp_lcd_panel_handle_t get_panel_handle(void)
@@ -188,6 +190,31 @@ int board_pmu_shutdown(void)
 
     ESP_LOGW(TAG, "AXP2101 soft poweroff");
     return pmu_write_reg(AXP2101_COMMON_CONFIG, value | 0x01);
+}
+
+int board_pmu_battery_percent(void)
+{
+    uint8_t status1 = 0;
+    esp_err_t err = pmu_read_reg(AXP2101_STATUS1, &status1);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "read AXP2101 STATUS1 failed: %s", esp_err_to_name(err));
+        return -1;
+    }
+    if ((status1 & (1 << 3)) == 0) {
+        return -1;
+    }
+
+    uint8_t percent = 0;
+    err = pmu_read_reg(AXP2101_BAT_PERCENT_DATA, &percent);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "read AXP2101 BAT_PERCENT_DATA failed: %s", esp_err_to_name(err));
+        return -1;
+    }
+
+    if (percent > 100) {
+        percent = 100;
+    }
+    return percent;
 }
 
 bool board_touch_read(uint16_t *x, uint16_t *y, uint16_t *strength)

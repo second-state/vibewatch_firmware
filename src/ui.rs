@@ -376,6 +376,10 @@ fn new_terminal_renderer() -> embedded_graphics_terminal::TerminalRenderer {
     )
     .with_fallback_font(u8g2_font_unifont_t_symbols)
     .with_fallback_font(u8g2_font_unifont_t_78_79)
+    .with_substitution('›', '>')
+    .with_substitution('•', '*')
+    .with_substitution('✻', '*')
+    .with_substitution('⏺', '*')
 }
 
 pub fn terminal_text_cells() -> (u16, u16) {
@@ -387,6 +391,7 @@ const ALPHA: f32 = 0.5;
 const MENU_ITEM_H: u16 = 66;
 const MENU_START_Y: u16 = 30;
 const MENU_FONT_H: u16 = 17;
+const TERMINAL_SCROLL_ROWS: usize = 10;
 const TERMINAL_SCROLLBACK_ROWS: usize = 64;
 
 #[derive(Clone)]
@@ -439,6 +444,7 @@ pub struct UI {
     display: Box<FastFramebuffer>,
     terminal_parser: Option<vt100::Parser>,
     terminal_renderer: Option<embedded_graphics_terminal::TerminalRenderer>,
+    jpeg_screen: Option<crate::new_jpg::JpegBufferu16>,
 }
 
 const DISPLAY_WIDTH: usize = crate::lcd::LCD_WIDTH as usize;
@@ -590,6 +596,7 @@ impl Default for UI {
             display,
             terminal_parser: None,
             terminal_renderer: None,
+            jpeg_screen: None,
             state_area,
             text_area,
         }
@@ -766,20 +773,36 @@ impl UI {
         Err(anyhow::anyhow!("flush terminal dirty rect failed"))
     }
 
+    fn flush_terminal_full(&self) -> anyhow::Result<i64> {
+        let flush_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+        for i in 0..5 {
+            let e = crate::lcd::flush_display(
+                self.display.data(),
+                0,
+                0,
+                DISPLAY_WIDTH as i32,
+                DISPLAY_HEIGHT as i32,
+            );
+            if e == 0 {
+                return Ok(unsafe { esp_idf_svc::sys::esp_timer_get_time() } - flush_start_us);
+            }
+            log::warn!("flush terminal full frame error: {e} retry {i}");
+        }
+        Err(anyhow::anyhow!("flush terminal full frame failed"))
+    }
+
     pub fn show_terminal_text_frame(&mut self, payload: &[u8]) -> anyhow::Result<()> {
         let Some((&tag, bytes)) = payload.split_first() else {
             log::warn!("empty screen_text frame");
             return Ok(());
         };
         let (cols, rows) = terminal_text_cells();
+        let full_frame = tag == 0x00;
         match tag {
             0x00 => {
                 log::info!("screen_text full frame: {}B", bytes.len());
                 self.terminal_parser =
                     Some(vt100::Parser::new(rows, cols, TERMINAL_SCROLLBACK_ROWS));
-                if let Some(renderer) = self.terminal_renderer.as_mut() {
-                    renderer.invalidate();
-                }
             }
             0x01 => {
                 log::debug!("screen_text delta frame: {}B", bytes.len());
@@ -809,23 +832,35 @@ impl UI {
             .take()
             .unwrap_or_else(new_terminal_renderer);
         let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
-        let dirty = match self.terminal_parser.as_ref() {
-            Some(parser) => renderer.render_diff(parser.screen(), self.display.as_mut())?,
-            None => None,
+        let dirty = if full_frame {
+            self.display.clear(ColorFormat::CSS_BLACK)?;
+            if let Some(parser) = self.terminal_parser.as_ref() {
+                renderer.render(parser.screen(), self.display.as_mut())?;
+            }
+            renderer.invalidate();
+            Some(self.display.bounding_box())
+        } else {
+            match self.terminal_parser.as_ref() {
+                Some(parser) => renderer.render_diff(parser.screen(), self.display.as_mut())?,
+                None => None,
+            }
         };
         let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
+        let cache_len = renderer.cache_len();
         self.terminal_renderer = Some(renderer);
 
-        let flush_elapsed_us = match dirty {
-            Some(rect) => self.flush_terminal_dirty(rect)?.unwrap_or(0),
-            None => 0,
+        let flush_elapsed_us = match (full_frame, dirty) {
+            (true, Some(_)) => self.flush_terminal_full()?,
+            (false, Some(rect)) => self.flush_terminal_dirty(rect)?.unwrap_or(0),
+            (_, None) => 0,
         };
         log::info!(
-            "screen_text frame tag=0x{tag:02x} bytes={} parse={:.2}ms render={:.2}ms flush={:.2}ms dirty={:?}",
+            "screen_text frame tag=0x{tag:02x} bytes={} parse={:.2}ms render={:.2}ms flush={:.2}ms cache_len={} dirty={:?}",
             bytes.len(),
             parse_elapsed_us as f32 / 1000.0,
             render_elapsed_us as f32 / 1000.0,
             flush_elapsed_us as f32 / 1000.0,
+            cache_len,
             dirty
         );
         Ok(())
@@ -836,11 +871,9 @@ impl UI {
             return Ok(false);
         };
         let before = parser.screen().scrollback();
-        let (rows, _) = parser.screen().size();
-        let page_rows = usize::from(rows.saturating_sub(2).max(1));
         let next = match direction {
-            TerminalScroll::Up => before.saturating_add(page_rows),
-            TerminalScroll::Down => before.saturating_sub(page_rows),
+            TerminalScroll::Up => before.saturating_add(TERMINAL_SCROLL_ROWS),
+            TerminalScroll::Down => before.saturating_sub(TERMINAL_SCROLL_ROWS),
         };
         parser.screen_mut().set_scrollback(next);
         let after = parser.screen().scrollback();
@@ -854,10 +887,55 @@ impl UI {
             .take()
             .unwrap_or_else(new_terminal_renderer);
         let dirty = renderer.render_diff(parser.screen(), self.display.as_mut())?;
+        log::info!("local text scroll cache_len={}", renderer.cache_len());
         self.terminal_renderer = Some(renderer);
         if let Some(rect) = dirty {
             let _ = self.flush_terminal_dirty(rect)?;
         }
+        Ok(true)
+    }
+
+    pub fn redraw_cached_terminal_text(&mut self) -> anyhow::Result<bool> {
+        let Some(parser) = self.terminal_parser.as_ref() else {
+            return Ok(false);
+        };
+
+        let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+        let mut renderer = self
+            .terminal_renderer
+            .take()
+            .unwrap_or_else(new_terminal_renderer);
+        self.display.clear(ColorFormat::CSS_BLACK)?;
+        renderer.render(parser.screen(), self.display.as_mut())?;
+        renderer.invalidate();
+        let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
+        let cache_len = renderer.cache_len();
+        self.terminal_renderer = Some(renderer);
+
+        let flush_elapsed_us = self.flush_terminal_full()?;
+        log::info!(
+            "redraw cached terminal text render={:.2}ms flush={:.2}ms cache_len={}",
+            render_elapsed_us as f32 / 1000.0,
+            flush_elapsed_us as f32 / 1000.0,
+            cache_len
+        );
+        Ok(true)
+    }
+
+    pub fn show_jpeg_screen(
+        &mut self,
+        screen: crate::new_jpg::JpegBufferu16,
+    ) -> anyhow::Result<()> {
+        screen.flush_to_lcd()?;
+        self.jpeg_screen = Some(screen);
+        Ok(())
+    }
+
+    pub fn redraw_cached_jpeg_screen(&self) -> anyhow::Result<bool> {
+        let Some(screen) = self.jpeg_screen.as_ref() else {
+            return Ok(false);
+        };
+        screen.flush_to_lcd()?;
         Ok(true)
     }
 
@@ -950,19 +1028,26 @@ impl UI {
             }
 
             item_rects.push(item.rect);
+            let draw_rect = Rectangle::new(
+                item.rect.top_left + Point::new(4, 3),
+                Size::new(
+                    item.rect.size.width.saturating_sub(8),
+                    item.rect.size.height.saturating_sub(6),
+                ),
+            );
             let mut style = PrimitiveStyleBuilder::new()
-                .stroke_color(item.bg_color.unwrap_or(ColorFormat::CSS_DARK_GRAY))
-                .stroke_width(1);
+                .stroke_color(ColorFormat::CSS_BLACK)
+                .stroke_width(8);
             if let Some(bg_color) = item.bg_color {
                 style = style.fill_color(bg_color);
             }
-            item.rect.into_styled(style.build()).draw(display)?;
+            draw_rect.into_styled(style.build()).draw(display)?;
             if let Some(fg_color) = item.fg_color {
                 let text_y =
-                    item.rect.top_left.y + (item.rect.size.height as i32 + MENU_FONT_H as i32) / 2;
+                    draw_rect.top_left.y + (draw_rect.size.height as i32 + MENU_FONT_H as i32) / 2;
                 Text::with_alignment(
                     &item.text,
-                    Point::new(item.rect.center().x, text_y),
+                    Point::new(draw_rect.center().x, text_y),
                     shifted_text_style(u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312, fg_color, 3),
                     Alignment::Center,
                 )
@@ -1012,12 +1097,17 @@ impl UI {
                     Point::new(0, item_top),
                     Size::new(DISPLAY_WIDTH as u32, MENU_ITEM_H as u32),
                 );
-                let fg_color = if *is_working {
+                let bg_color = if *is_working {
                     ColorFormat::CSS_DARK_BLUE
                 } else {
                     ColorFormat::CSS_DARK_ORANGE
                 };
-                Some(ListItem::new(rect, label.clone(), None, Some(fg_color)))
+                Some(ListItem::new(
+                    rect,
+                    label.clone(),
+                    Some(bg_color),
+                    Some(ColorFormat::CSS_WHITE),
+                ))
             })
             .collect();
 

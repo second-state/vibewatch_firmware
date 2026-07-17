@@ -18,6 +18,7 @@ bool board_touch_read(uint16_t *x, uint16_t *y, uint16_t *strength);
 int board_pmu_init(void);
 bool board_pmu_take_pkey_long_press(void);
 int board_pmu_shutdown(void);
+int board_pmu_battery_percent(void);
 int board_audio_init(void);
 int board_audio_read_mic(void *data, int len);
 int board_audio_sample_rate(void);

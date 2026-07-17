@@ -5,6 +5,7 @@ extern "C" {
     fn board_pmu_init() -> std::ffi::c_int;
     fn board_pmu_take_pkey_long_press() -> bool;
     fn board_pmu_shutdown() -> std::ffi::c_int;
+    fn board_pmu_battery_percent() -> std::ffi::c_int;
 }
 
 static POWER_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
@@ -43,6 +44,15 @@ pub fn shutdown() {
     let err = unsafe { board_pmu_shutdown() };
     if err != esp_idf_svc::sys::ESP_OK as i32 {
         log::error!("board_pmu_shutdown failed: esp_err_t={err}");
+    }
+}
+
+pub fn battery_percent() -> Option<u8> {
+    let percent = unsafe { board_pmu_battery_percent() };
+    if (0..=100).contains(&percent) {
+        Some(percent as u8)
+    } else {
+        None
     }
 }
 
