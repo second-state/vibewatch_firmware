@@ -598,7 +598,9 @@ fn render_session_picker(
             .skip(scroll_offset)
             .map(|(_, label, _, is_working)| (label.clone(), *is_working))
             .collect();
-        *item_rects = gui.display_list("Sessions", &items, 0).unwrap_or_default();
+        *item_rects = gui
+            .display_menu_list("Sessions", &items, 0)
+            .unwrap_or_default();
     }
 }
 

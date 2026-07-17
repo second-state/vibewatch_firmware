@@ -17,7 +17,8 @@ use u8g2_fonts::U8g2TextStyle;
 const GIF_IMG: &[u8] = include_bytes!("../assets/ht.gif");
 const TERMINAL_ANS: &str = include_str!("../../embedded-graphics-terminal/vibetty.ans");
 
-type ColorFormat = Rgb565;
+pub type UiColor = Rgb565;
+type ColorFormat = UiColor;
 
 #[derive(Debug, Clone)]
 struct MyTextStyle {
@@ -347,6 +348,30 @@ const MENU_ITEM_H: u16 = 66;
 const MENU_START_Y: u16 = 30;
 const MENU_FONT_H: u16 = 17;
 
+#[derive(Clone)]
+pub struct ListItem {
+    pub rect: Rectangle,
+    pub text: String,
+    pub bg_color: Option<UiColor>,
+    pub fg_color: Option<UiColor>,
+}
+
+impl ListItem {
+    pub fn new(
+        rect: Rectangle,
+        text: impl Into<String>,
+        bg_color: Option<UiColor>,
+        fg_color: Option<UiColor>,
+    ) -> Self {
+        Self {
+            rect,
+            text: text.into(),
+            bg_color,
+            fg_color,
+        }
+    }
+}
+
 pub enum MainMenuSelection {
     Remote,
     Setting,
@@ -409,7 +434,7 @@ pub async fn select_menu_item(
     title: &str,
     items: &[(String, bool)],
 ) -> anyhow::Result<usize> {
-    let item_rects = gui.display_list(title, items, 0)?;
+    let item_rects = gui.display_menu_list(title, items, 0)?;
     log::info!("{title}: waiting for touch selection");
 
     let mut press_index = None;
@@ -727,13 +752,11 @@ impl UI {
         Ok(())
     }
 
-    /// 渲染通用列表:标题 + 每行一个标签(焦点行蓝底)。
-    /// `items` = (标签, is_working);`focus` = 焦点行。整屏 flush。
+    /// Render generic list items. Each item owns its geometry and optional colors.
     pub fn display_list(
         &mut self,
         title: &str,
-        items: &[(String, bool)],
-        focus: usize,
+        items: &[ListItem],
     ) -> anyhow::Result<Vec<Rectangle>> {
         crate::lcd::clear();
 
@@ -752,40 +775,34 @@ impl UI {
         .draw(display)?;
 
         let mut item_rects = Vec::new();
-        for (i, (label, is_working)) in items.iter().enumerate() {
-            let item_top = MENU_START_Y as i32 + (i as i32) * MENU_ITEM_H as i32;
-            if item_top + MENU_ITEM_H as i32 > DISPLAY_HEIGHT as i32 {
+        for item in items {
+            if item.rect.top_left.y + item.rect.size.height as i32 > DISPLAY_HEIGHT as i32 {
                 break;
             }
-            let item_rect = Rectangle::new(
-                Point::new(0, item_top),
-                Size::new(DISPLAY_WIDTH as u32, MENU_ITEM_H as u32),
-            );
-            item_rects.push(item_rect);
-            if i == focus {
-                item_rect
+
+            item_rects.push(item.rect);
+            if let Some(bg_color) = item.bg_color {
+                item.rect
                     .into_styled(
                         PrimitiveStyleBuilder::new()
-                            .fill_color(ColorFormat::CSS_DARK_BLUE)
-                            .stroke_color(ColorFormat::CSS_DARK_BLUE)
+                            .fill_color(bg_color)
+                            .stroke_color(bg_color)
                             .stroke_width(1)
                             .build(),
                     )
                     .draw(display)?;
             }
-            let color = if *is_working {
-                ColorFormat::CSS_WHITE
-            } else {
-                ColorFormat::CSS_DARK_ORANGE
-            };
-            let text_y = item_top + (MENU_ITEM_H as i32 + MENU_FONT_H as i32) / 2;
-            Text::with_alignment(
-                label,
-                Point::new((DISPLAY_WIDTH / 2) as i32, text_y),
-                U8g2TextStyle::new(u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312, color),
-                Alignment::Center,
-            )
-            .draw(display)?;
+            if let Some(fg_color) = item.fg_color {
+                let text_y =
+                    item.rect.top_left.y + (item.rect.size.height as i32 + MENU_FONT_H as i32) / 2;
+                Text::with_alignment(
+                    &item.text,
+                    Point::new(item.rect.center().x, text_y),
+                    shifted_text_style(u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312, fg_color, 3),
+                    Alignment::Center,
+                )
+                .draw(display)?;
+            }
         }
 
         log::info!(
@@ -809,5 +826,38 @@ impl UI {
             log::warn!("flush list error: {e} retry {i}");
         }
         Err(anyhow::anyhow!("flush list failed"))
+    }
+
+    /// Compatibility helper for the existing menu/session list layout.
+    pub fn display_menu_list(
+        &mut self,
+        title: &str,
+        items: &[(String, bool)],
+        focus: usize,
+    ) -> anyhow::Result<Vec<Rectangle>> {
+        let list_items: Vec<ListItem> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (label, is_working))| {
+                let item_top = MENU_START_Y as i32 + (i as i32) * MENU_ITEM_H as i32;
+                if item_top + MENU_ITEM_H as i32 > DISPLAY_HEIGHT as i32 {
+                    return None;
+                }
+
+                let rect = Rectangle::new(
+                    Point::new(0, item_top),
+                    Size::new(DISPLAY_WIDTH as u32, MENU_ITEM_H as u32),
+                );
+                let bg_color = (i == focus).then_some(ColorFormat::CSS_DARK_BLUE);
+                let fg_color = if *is_working {
+                    ColorFormat::CSS_WHITE
+                } else {
+                    ColorFormat::CSS_DARK_ORANGE
+                };
+                Some(ListItem::new(rect, label.clone(), bg_color, Some(fg_color)))
+            })
+            .collect();
+
+        self.display_list(title, &list_items)
     }
 }
