@@ -425,6 +425,7 @@ pub enum MainMenuSelection {
 
 pub enum SettingMenuSelection {
     Ota,
+    Ble,
     Back,
 }
 
@@ -472,12 +473,14 @@ pub async fn setting_menu(
 ) -> anyhow::Result<SettingMenuSelection> {
     let items = vec![
         ("OTA Update".to_string(), false),
+        ("Enable BLE".to_string(), false),
         ("Back".to_string(), false),
     ];
     let index = select_menu_item(gui, touch_rx, "Setting", &items).await?;
     Ok(match index {
         0 => SettingMenuSelection::Ota,
-        1 => SettingMenuSelection::Back,
+        1 => SettingMenuSelection::Ble,
+        2 => SettingMenuSelection::Back,
         _ => unreachable!(),
     })
 }

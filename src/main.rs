@@ -76,6 +76,15 @@ fn main() -> anyhow::Result<()> {
             ui::MainMenuSelection::Setting => {
                 match runtime.block_on(ui::setting_menu(&mut gui, &mut touch_rx))? {
                     ui::SettingMenuSelection::Ota => break ui::MainMenuSelection::Setting,
+                    ui::SettingMenuSelection::Ble => {
+                        gui.show_status("BLE Setup", "Connect BLE \"Watch\"\nopen setup.html")
+                            .ok();
+                        if let Err(e) = ble_provision::provision(nvs) {
+                            log::error!("BLE provision failed: {e:?}");
+                            std::thread::sleep(std::time::Duration::from_secs(3));
+                        }
+                        restart();
+                    }
                     ui::SettingMenuSelection::Back => continue,
                 }
             }
