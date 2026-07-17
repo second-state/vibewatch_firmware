@@ -6,6 +6,7 @@ mod lcd;
 mod mqtt;
 mod network;
 mod new_jpg;
+mod ota;
 mod power;
 mod protocol;
 mod remote;
@@ -13,22 +14,9 @@ mod setting;
 mod ui;
 mod util;
 
-const DEFAULT_SNTP_SERVERS: [&str; 4] = [
-    "time.windows.com",
-    "time.google.com",
-    "ntp.aliyun.com",
-    "time.cloudflare.com",
-];
-
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
-
-    // A/B 双槽 OTA:标记当前启动槽为有效(确认本次正常启动;配合回滚机制)。
-    {
-        let mut ota = esp_idf_svc::ota::EspOta::new()?;
-        ota.mark_running_slot_valid()?;
-    }
 
     let peripherals = esp_idf_svc::hal::peripherals::Peripherals::take().unwrap();
     let sysloop = EspSystemEventLoop::take()?;
@@ -45,7 +33,7 @@ fn main() -> anyhow::Result<()> {
     // === LCD + touch: Waveshare ESP32-S3-Touch-AMOLED-2.06 BSP ===
     lcd::init()?;
     lcd::touch_init()?;
-    let (touch_tx, touch_rx) = tokio::sync::mpsc::channel::<lcd::TouchEvent>(16);
+    let (touch_tx, mut touch_rx) = tokio::sync::mpsc::channel::<lcd::TouchEvent>(16);
     lcd::start_touch_worker(touch_tx)?;
     lcd::set_backlight(30)?;
     power::init()?;
@@ -62,11 +50,16 @@ fn main() -> anyhow::Result<()> {
     }
     let mut gui = ui::UI::default();
 
+    // A/B 双槽 OTA:标记当前启动槽为有效(确认本次正常启动;配合回滚机制)。
+    {
+        let mut ota = esp_idf_svc::ota::EspOta::new()?;
+        ota.mark_running_slot_valid()?;
+    }
+
     if setting.need_init() {
         // 首次启动:BLE 配网(手机连蓝牙 "Watch",通过 setup.html 写 WiFi 列表 + MQTT broker)
-        gui.state = "Setup".to_string();
-        gui.text = "Connect BLE \"Watch\"\nopen setup.html".to_string();
-        gui.display_flush().ok();
+        gui.show_status("Setup", "Connect BLE \"Watch\"\nopen setup.html")
+            .ok();
 
         if let Err(e) = ble_provision::provision(nvs) {
             log::error!("BLE provision failed: {e:?}");
@@ -75,38 +68,47 @@ fn main() -> anyhow::Result<()> {
         restart();
     }
 
+    let mode = loop {
+        match runtime.block_on(ui::main_menu(&mut gui, &mut touch_rx))? {
+            ui::MainMenuSelection::Remote => break ui::MainMenuSelection::Remote,
+            ui::MainMenuSelection::Setting => {
+                match runtime.block_on(ui::setting_menu(&mut gui, &mut touch_rx))? {
+                    ui::SettingMenuSelection::Ota => break ui::MainMenuSelection::Setting,
+                    ui::SettingMenuSelection::Back => continue,
+                }
+            }
+        }
+    };
+    match mode {
+        ui::MainMenuSelection::Remote => {}
+        ui::MainMenuSelection::Setting => {
+            runtime.block_on(ota::run(
+                peripherals.modem,
+                sysloop,
+                &setting,
+                &mut gui,
+                &mut touch_rx,
+            ))?;
+            return Ok(());
+        }
+    }
+
     // 连 WiFi:从 wifi_list 里挑第一个在范围内的(顺序=优先级)
-    gui.state = "Connecting WiFi...".to_string();
-    gui.text.clear();
-    gui.display_flush().ok();
+    gui.show_status("Connecting WiFi...", "").ok();
 
     let wifi = network::wifi_connect(peripherals.modem, sysloop, &setting.wifi_list);
     if let Err(e) = wifi.as_ref() {
-        gui.state = "WiFi failed".to_string();
-        gui.text = format!("{e:?}\nReset in 5s...");
-        gui.display_flush().ok();
+        gui.show_status("WiFi failed", format!("{e:?}\nReset in 5s..."))
+            .ok();
         std::thread::sleep(std::time::Duration::from_secs(5));
         restart();
     }
     let _wifi = wifi.unwrap();
     log::info!("WiFi connected");
 
-    // mqtts:// / Whisper https:// 需要 TLS 证书校验 → 先 SNTP 同步时间。
-    if setting.server_url.starts_with("mqtts")
-        || asr_config.as_ref().map_or(false, |c| c.requires_tls())
-    {
-        gui.state = "Syncing time...".to_string();
-        gui.text.clear();
-        gui.display_flush().ok();
-        if let Err(e) = sync_time() {
-            log::warn!("sync_time failed: {e:?}");
-        }
-    }
-
     // Remote:MQTT 连 vibetty → 进入 session list(停留等输入选会话)
-    gui.state = "Connecting MQTT...".to_string();
-    gui.text = setting.server_url.clone();
-    gui.display_flush().ok();
+    gui.show_status("Connecting MQTT...", setting.server_url.clone())
+        .ok();
 
     let client_id = wifi_sta_mac_client_id();
     let (asr_tx, asr_rx) = std::sync::mpsc::channel::<audio::AsrRequest>();
@@ -145,32 +147,9 @@ fn main() -> anyhow::Result<()> {
     log::info!("remote exited: {:?}", r);
 
     let mut gui = ui::UI::default();
-    gui.state = "Disconnected".to_string();
-    gui.text = format!("{:?}", r);
-    gui.display_flush().ok();
+    gui.show_status("Disconnected", format!("{:?}", r)).ok();
     std::thread::sleep(std::time::Duration::from_secs(5));
     restart();
-}
-
-/// SNTP 同步时间:4 个 server 并发查询,谁先回用谁,最多等 15s。
-fn sync_time() -> anyhow::Result<()> {
-    use esp_idf_svc::sntp::{EspSntp, OperatingMode, SntpConf, SyncMode, SyncStatus};
-    log::info!("SNTP sync ({} servers)", DEFAULT_SNTP_SERVERS.len());
-    let conf = SntpConf {
-        servers: DEFAULT_SNTP_SERVERS,
-        operating_mode: OperatingMode::Poll,
-        sync_mode: SyncMode::Immediate,
-    };
-    let ntp = EspSntp::new(&conf)?;
-    for i in 0..15 {
-        if ntp.get_sync_status() == SyncStatus::Completed {
-            log::info!("SNTP sync completed");
-            return Ok(());
-        }
-        log::info!("sntp waiting ({})", i);
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    }
-    Err(anyhow::anyhow!("SNTP sync timeout"))
 }
 
 /// 用 WiFi STA MAC 生成 broker 内唯一的 MQTT client_id(esp_read_mac 直接读 efuse)。
@@ -186,16 +165,4 @@ fn wifi_sta_mac_client_id() -> String {
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
         )
     }
-}
-
-/// 切到另一个 OTA 槽并重启:设置页选「OTA Update」后调用 → 进救援固件(ota_0)。
-/// 触发入口待接触屏后接入(与 session 选择共用输入层);现在先就位,未接线故 allow(dead_code)。
-#[allow(dead_code)]
-pub(crate) fn goto_next_firmware() -> anyhow::Result<()> {
-    use esp_idf_svc::sys::{esp_ota_get_next_update_partition, esp_ota_set_boot_partition};
-    unsafe {
-        let partition = esp_ota_get_next_update_partition(std::ptr::null());
-        esp_idf_svc::sys::esp!(esp_ota_set_boot_partition(partition))?;
-    }
-    esp_idf_svc::hal::reset::restart();
 }

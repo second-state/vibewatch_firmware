@@ -234,22 +234,113 @@ pub fn render_terminal_ans_demo() -> anyhow::Result<()> {
 }
 
 const ALPHA: f32 = 0.5;
+const MENU_ITEM_H: u16 = 66;
+const MENU_START_Y: u16 = 30;
+const MENU_FONT_H: u16 = 17;
+
+pub enum MainMenuSelection {
+    Remote,
+    Setting,
+}
+
+pub enum SettingMenuSelection {
+    Ota,
+    Back,
+}
 
 pub struct UI {
-    pub state: String,
+    state: String,
     state_area: Rectangle,
     state_background: Vec<Pixel<ColorFormat>>,
-    pub text: String,
+    text: String,
     text_area: Rectangle,
     text_background: Vec<Pixel<ColorFormat>>,
 
-    pub reset: bool,
     display: Box<FastFramebuffer>,
 }
 
 const DISPLAY_WIDTH: usize = crate::lcd::LCD_WIDTH as usize;
 const DISPLAY_HEIGHT: usize = crate::lcd::LCD_HEIGHT as usize;
-const COLOR_WIDTH: u32 = 2;
+
+pub async fn main_menu(
+    gui: &mut UI,
+    touch_rx: &mut tokio::sync::mpsc::Receiver<crate::lcd::TouchEvent>,
+) -> anyhow::Result<MainMenuSelection> {
+    let items = vec![
+        ("Remote".to_string(), false),
+        ("Setting".to_string(), false),
+    ];
+    let index = select_menu_item(gui, touch_rx, "Main Menu", &items).await?;
+    Ok(match index {
+        0 => MainMenuSelection::Remote,
+        1 => MainMenuSelection::Setting,
+        _ => unreachable!(),
+    })
+}
+
+pub async fn setting_menu(
+    gui: &mut UI,
+    touch_rx: &mut tokio::sync::mpsc::Receiver<crate::lcd::TouchEvent>,
+) -> anyhow::Result<SettingMenuSelection> {
+    let items = vec![
+        ("OTA Update".to_string(), false),
+        ("Back".to_string(), false),
+    ];
+    let index = select_menu_item(gui, touch_rx, "Setting", &items).await?;
+    Ok(match index {
+        0 => SettingMenuSelection::Ota,
+        1 => SettingMenuSelection::Back,
+        _ => unreachable!(),
+    })
+}
+
+pub async fn select_menu_item(
+    gui: &mut UI,
+    touch_rx: &mut tokio::sync::mpsc::Receiver<crate::lcd::TouchEvent>,
+    title: &str,
+    items: &[(String, bool)],
+) -> anyhow::Result<usize> {
+    let item_rects = gui.display_list(title, items, 0)?;
+    log::info!("{title}: waiting for touch selection");
+
+    let mut press_index = None;
+    loop {
+        match touch_rx.recv().await {
+            Some(crate::lcd::TouchEvent::Press(touch)) => {
+                if press_index.is_none() {
+                    press_index = list_touch_index(touch, &item_rects);
+                }
+            }
+            Some(crate::lcd::TouchEvent::Release(touch)) => {
+                let release_index = list_touch_index(touch, &item_rects);
+                if press_index.is_some() && press_index == release_index {
+                    let index = press_index.unwrap();
+                    log::info!("{title}: selected item {index}");
+                    return Ok(index);
+                }
+                log::info!(
+                    "{title}: ignored touch, press={:?} release={:?}",
+                    press_index,
+                    release_index
+                );
+                press_index = None;
+            }
+            None => return Err(anyhow::anyhow!("touch event source closed")),
+        }
+    }
+}
+
+pub fn list_touch_index(touch: crate::lcd::TouchPoint, item_rects: &[Rectangle]) -> Option<usize> {
+    let x = touch.x as i32;
+    let y = touch.y as i32;
+    item_rects.iter().position(|rect| {
+        let left = rect.top_left.x;
+        let top = rect.top_left.y;
+        let right = left + rect.size.width as i32;
+        let bottom = top + rect.size.height as i32;
+        x >= left && x < right && y >= top && y < bottom
+    })
+}
 
 impl Default for UI {
     fn default() -> Self {
@@ -314,7 +405,6 @@ impl Default for UI {
             state_background: state_pixels,
             text: String::new(),
             text_background: box_pixels,
-            reset: false,
             display,
             state_area,
             text_area,
@@ -330,28 +420,24 @@ fn alpha_mix(source: ColorFormat, target: ColorFormat, alpha: f32) -> ColorForma
     )
 }
 
-fn flush_area<const COLOR_WIDTH: u32>(data: &[u8], size: Size, area: Rectangle) -> i32 {
-    let start_y = area.top_left.y as u32;
-    let end_y = start_y + area.size.height;
-
-    let start_index = start_y * size.width * COLOR_WIDTH;
-    let data_len = area.size.height * size.width * COLOR_WIDTH;
-    if let Some(area_data) = data.get(start_index as usize..(start_index + data_len) as usize) {
-        crate::lcd::flush_display(
-            area_data,
-            0,
-            start_y as i32,
-            size.width as i32,
-            end_y as i32,
-        )
-    } else {
-        -1
-    }
-}
-
 impl UI {
+    pub fn show_status(
+        &mut self,
+        state: impl Into<String>,
+        text: impl Into<String>,
+    ) -> anyhow::Result<()> {
+        self.state = state.into();
+        self.text = text.into();
+        self.display_flush()
+    }
+
     // 横向42个字符
-    pub fn display_flush(&mut self) -> anyhow::Result<()> {
+    fn display_flush(&mut self) -> anyhow::Result<()> {
+        let image = tinygif::Gif::<ColorFormat>::from_slice(GIF_IMG).unwrap();
+        for frame in image.frames() {
+            frame.draw(self.display.as_mut())?;
+        }
+
         self.state_background
             .iter()
             .cloned()
@@ -372,66 +458,30 @@ impl UI {
         )
         .draw(self.display.as_mut())?;
 
-        if !self.reset {
-            // let lines = self.text.lines().count();
-            // Text::with_alignment(
-            //     &self.text,
-            //     self.text_area.center() + Point::new(0, -6 * (lines as i32)),
-            //     U8g2TextStyle::new(
-            //         u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312b,
-            //         ColorFormat::CSS_WHEAT,
-            //     ),
-            //     Alignment::Center,
-            // )
-            // .draw(self.display.as_mut())?;
-            let textbox_style = embedded_text::style::TextBoxStyleBuilder::new()
-                .height_mode(embedded_text::style::HeightMode::FitToText)
-                .alignment(embedded_text::alignment::HorizontalAlignment::Center)
-                .line_height(embedded_graphics::text::LineHeight::Pixels(20))
-                .paragraph_spacing(20)
-                .build();
-            let text_box = TextBox::with_textbox_style(
-                &self.text,
-                self.text_area,
-                U8g2TextStyle::new(
-                    u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
-                    ColorFormat::CSS_WHEAT,
-                ),
-                textbox_style,
-            );
-            text_box.draw(self.display.as_mut())?;
-        } else {
-            Text::with_alignment(
-                &format!("Do you want to reset the device?\n[yes] or [no]"),
-                self.text_area.center(),
-                U8g2TextStyle::new(
-                    u8g2_fonts::fonts::u8g2_font_unifont_t_gb2312b,
-                    ColorFormat::CSS_SANDY_BROWN,
-                ),
-                Alignment::Center,
-            )
-            .draw(self.display.as_mut())?;
-        }
+        let textbox_style = embedded_text::style::TextBoxStyleBuilder::new()
+            .height_mode(embedded_text::style::HeightMode::FitToText)
+            .alignment(embedded_text::alignment::HorizontalAlignment::Center)
+            .line_height(embedded_graphics::text::LineHeight::Pixels(20))
+            .paragraph_spacing(20)
+            .build();
+        let text_box = TextBox::with_textbox_style(
+            &self.text,
+            self.text_area,
+            U8g2TextStyle::new(
+                u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
+                ColorFormat::CSS_WHEAT,
+            ),
+            textbox_style,
+        );
+        text_box.draw(self.display.as_mut())?;
 
         for i in 0..5 {
-            // let e = crate::lcd::flush_display(
-            //     self.display.data(),
-            //     0,
-            //     0,
-            //     DISPLAY_WIDTH as _,
-            //     DISPLAY_HEIGHT as _,
-            // );
-
-            let e = flush_area::<COLOR_WIDTH>(
+            let e = crate::lcd::flush_display(
                 self.display.data(),
-                self.display.size(),
-                Rectangle::new(
-                    self.text_area.top_left,
-                    Size::new(
-                        self.text_area.size.width,
-                        self.text_area.size.height + self.state_area.size.height,
-                    ),
-                ),
+                0,
+                0,
+                DISPLAY_WIDTH as _,
+                DISPLAY_HEIGHT as _,
             );
             if e == 0 {
                 break;
@@ -441,73 +491,87 @@ impl UI {
         Ok(())
     }
 
-    /// 渲染 vibetty 会话列表:标题 + 每行一个会话标签(焦点行蓝底)。
+    /// 渲染通用列表:标题 + 每行一个标签(焦点行蓝底)。
     /// `items` = (标签, is_working);`focus` = 焦点行。整屏 flush。
-    pub fn display_session_list(
+    pub fn display_list(
         &mut self,
         title: &str,
         items: &[(String, bool)],
         focus: usize,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<Rectangle>> {
+        crate::lcd::clear();
+
         let display = self.display.as_mut();
         display.clear(ColorFormat::WHITE)?;
 
         Text::with_alignment(
             title,
-            Point::new(8, 18),
+            Point::new((DISPLAY_WIDTH / 2) as i32, 18),
             U8g2TextStyle::new(
                 u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
                 ColorFormat::CSS_DARK_BLUE,
             ),
-            Alignment::Left,
+            Alignment::Center,
         )
         .draw(display)?;
 
-        let item_h: i32 = 22;
-        let start_y: i32 = 30;
+        let mut item_rects = Vec::new();
         for (i, (label, is_working)) in items.iter().enumerate() {
-            let y = start_y + (i as i32) * item_h;
-            if y + item_h > DISPLAY_HEIGHT as i32 {
+            let item_top = MENU_START_Y as i32 + (i as i32) * MENU_ITEM_H as i32;
+            if item_top + MENU_ITEM_H as i32 > DISPLAY_HEIGHT as i32 {
                 break;
             }
+            let item_rect = Rectangle::new(
+                Point::new(0, item_top),
+                Size::new(DISPLAY_WIDTH as u32, MENU_ITEM_H as u32),
+            );
+            item_rects.push(item_rect);
             if i == focus {
-                Rectangle::new(
-                    Point::new(0, y - 17),
-                    Size::new(DISPLAY_WIDTH as u32, item_h as u32),
-                )
-                .into_styled(
-                    PrimitiveStyleBuilder::new()
-                        .fill_color(ColorFormat::CSS_DARK_BLUE)
-                        .stroke_color(ColorFormat::CSS_DARK_BLUE)
-                        .stroke_width(1)
-                        .build(),
-                )
-                .draw(display)?;
+                item_rect
+                    .into_styled(
+                        PrimitiveStyleBuilder::new()
+                            .fill_color(ColorFormat::CSS_DARK_BLUE)
+                            .stroke_color(ColorFormat::CSS_DARK_BLUE)
+                            .stroke_width(1)
+                            .build(),
+                    )
+                    .draw(display)?;
             }
             let color = if *is_working {
                 ColorFormat::CSS_WHITE
             } else {
                 ColorFormat::CSS_DARK_ORANGE
             };
+            let text_y = item_top + (MENU_ITEM_H as i32 + MENU_FONT_H as i32) / 2;
             Text::with_alignment(
                 label,
-                Point::new(10, y),
+                Point::new((DISPLAY_WIDTH / 2) as i32, text_y),
                 U8g2TextStyle::new(u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312, color),
-                Alignment::Left,
+                Alignment::Center,
             )
             .draw(display)?;
         }
 
-        let e = crate::lcd::flush_display(
-            self.display.data(),
-            0,
-            0,
-            DISPLAY_WIDTH as i32,
-            DISPLAY_HEIGHT as i32,
+        log::info!(
+            "display_list: title={:?}, items={}, rects={}",
+            title,
+            items.len(),
+            item_rects.len()
         );
-        if e != 0 {
-            log::warn!("flush session list error: {e}");
+        for i in 0..5 {
+            let e = crate::lcd::flush_display(
+                self.display.data(),
+                0,
+                0,
+                DISPLAY_WIDTH as i32,
+                DISPLAY_HEIGHT as i32,
+            );
+            if e == 0 {
+                log::info!("display_list flush ok");
+                return Ok(item_rects);
+            }
+            log::warn!("flush list error: {e} retry {i}");
         }
-        Ok(())
+        Err(anyhow::anyhow!("flush list failed"))
     }
 }

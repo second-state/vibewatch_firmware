@@ -23,9 +23,7 @@ pub async fn run(
         Ok(s) => s,
         Err(e) => {
             log::error!("MQTT connect failed: {e:?}");
-            gui.state = "MQTT failed".to_string();
-            gui.text = format!("{e:?}");
-            let _ = gui.display_flush();
+            let _ = gui.show_status("MQTT failed", format!("{e:?}"));
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             return Err(e);
         }
@@ -107,9 +105,7 @@ async fn run_touch_asr(
     asr_config: Option<&audio::AsrConfig>,
 ) -> anyhow::Result<()> {
     let Some(config) = asr_config.cloned() else {
-        gui.state = "ASR not configured".to_string();
-        gui.text = "Set asr_config over BLE".to_string();
-        let _ = gui.display_flush();
+        let _ = gui.show_status("ASR not configured", "Set asr_config over BLE");
         wait_touch_release(touch_rx).await;
         return Ok(());
     };
@@ -122,14 +118,10 @@ async fn run_touch_asr(
         respond,
     };
 
-    gui.state = "Listening...".to_string();
-    gui.text = "Release to stop".to_string();
-    let _ = gui.display_flush();
+    let _ = gui.show_status("Listening...", "Release to stop");
 
     if asr_tx.send(req).is_err() {
-        gui.state = "ASR unavailable".to_string();
-        gui.text.clear();
-        let _ = gui.display_flush();
+        let _ = gui.show_status("ASR unavailable", "");
         return Ok(());
     }
 
@@ -156,22 +148,16 @@ async fn run_touch_asr(
         Ok(text) if !text.trim().is_empty() => {
             let text = text.trim().to_string();
             log::info!("Local ASR result: {text}");
-            gui.state = "Sending ASR".to_string();
-            gui.text = text.clone();
-            let _ = gui.display_flush();
+            let _ = gui.show_status("Sending ASR", text.clone());
             server.send(protocol::ClientMessage::Input(text)).await?;
             server.send(protocol::ClientMessage::sync()).await?;
         }
         Ok(_) => {
-            gui.state = "ASR empty".to_string();
-            gui.text.clear();
-            let _ = gui.display_flush();
+            let _ = gui.show_status("ASR empty", "");
         }
         Err(e) => {
             log::error!("ASR failed: {e:?}");
-            gui.state = "ASR failed".to_string();
-            gui.text = format!("{e:?}");
-            let _ = gui.display_flush();
+            let _ = gui.show_status("ASR failed", format!("{e:?}"));
         }
     }
 
@@ -181,7 +167,7 @@ async fn run_touch_asr(
 fn update_asr_touch_pressed(event: Option<lcd::TouchEvent>) -> bool {
     match event {
         Some(lcd::TouchEvent::Press(touch)) => is_asr_touch(touch),
-        Some(lcd::TouchEvent::Release) | None => false,
+        Some(lcd::TouchEvent::Release(_)) | None => false,
     }
 }
 
@@ -212,9 +198,7 @@ async fn open_session_picker(
     // 入口:retained presence 在 subscribe 后很快到达,但需 poll recv 才进 sessions 表。
     // 最多等 1500ms 让它们落地。
     if server.session_labels().is_empty() {
-        gui.state = "Loading sessions...".to_string();
-        gui.text.clear();
-        let _ = gui.display_flush();
+        let _ = gui.show_status("Loading sessions...", "");
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
         loop {
             if !server.session_labels().is_empty() {
@@ -229,21 +213,20 @@ async fn open_session_picker(
 
     loop {
         let labels = server.session_labels();
-        if labels.is_empty() {
-            gui.state = "no session".to_string();
-            gui.text.clear();
-            let _ = gui.display_flush();
+        let item_rects = if labels.is_empty() {
+            let _ = gui.show_status("no session", "");
+            Vec::new()
         } else {
             let items: Vec<(String, bool)> = labels
                 .iter()
                 .map(|(_, label, _, is_working)| (label.clone(), *is_working))
                 .collect();
-            let _ = gui.display_session_list("Sessions", &items, 0);
-        }
+            gui.display_list("Sessions", &items, 0).unwrap_or_default()
+        };
 
         tokio::select! {
             event = touch_rx.recv() => {
-                if let Some(index) = touched_session_event_index(event, labels.len()) {
+                if let Some(index) = touched_session_event_index(event, &item_rects) {
                     let prefix = labels[index].0.clone();
                     server.set_active(&prefix);
                     server.send(protocol::ClientMessage::sync()).await?;
@@ -265,23 +248,12 @@ async fn open_session_picker(
     }
 }
 
-fn touched_session_event_index(event: Option<lcd::TouchEvent>, len: usize) -> Option<usize> {
+fn touched_session_event_index(
+    event: Option<lcd::TouchEvent>,
+    item_rects: &[embedded_graphics::primitives::Rectangle],
+) -> Option<usize> {
     match event {
-        Some(lcd::TouchEvent::Press(touch)) => touched_session_index(touch, len),
+        Some(lcd::TouchEvent::Press(touch)) => crate::ui::list_touch_index(touch, item_rects),
         _ => None,
     }
-}
-
-fn touched_session_index(touch: lcd::TouchPoint, len: usize) -> Option<usize> {
-    const ITEM_H: u16 = 22;
-    const START_Y: u16 = 30;
-    const TEXT_BASELINE_OFFSET: u16 = 17;
-
-    let list_top = START_Y.saturating_sub(TEXT_BASELINE_OFFSET);
-    if touch.y < list_top {
-        return None;
-    }
-
-    let index = ((touch.y - list_top) / ITEM_H) as usize;
-    (index < len).then_some(index)
 }

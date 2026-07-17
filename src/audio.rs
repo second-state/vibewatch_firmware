@@ -77,12 +77,6 @@ impl AsrConfig {
         nvs.set_str("asr_config", &json)?;
         Ok(())
     }
-
-    pub fn requires_tls(&self) -> bool {
-        match self {
-            AsrConfig::Whisper { uri, .. } => uri.starts_with("https://"),
-        }
-    }
 }
 
 pub struct AsrRequest {

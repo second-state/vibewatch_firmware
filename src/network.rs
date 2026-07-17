@@ -3,9 +3,16 @@ use esp_idf_svc::{
     hal::modem::WifiModemPeripheral,
     wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi},
 };
-use log::info;
+use log::{info, warn};
 
 use crate::setting::{pick_cred, WifiCred};
+
+const DEFAULT_SNTP_SERVERS: [&str; 4] = [
+    "time.windows.com",
+    "time.google.com",
+    "ntp.aliyun.com",
+    "time.cloudflare.com",
+];
 
 /// 以 STA 连接:扫描周围 WiFi,从 `wifi_list` 里挑第一个在范围内的(顺序=优先级)连上。
 pub fn wifi_connect(
@@ -64,5 +71,30 @@ pub fn wifi_connect(
     let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
     info!("Wifi DHCP info: {:?}", ip_info);
 
+    if let Err(e) = sync_time() {
+        warn!("SNTP sync failed after WiFi connect: {e:?}");
+    }
+
     Ok(Box::new(esp_wifi))
+}
+
+fn sync_time() -> anyhow::Result<()> {
+    use esp_idf_svc::sntp::{EspSntp, OperatingMode, SntpConf, SyncMode, SyncStatus};
+
+    info!("SNTP sync ({} servers)", DEFAULT_SNTP_SERVERS.len());
+    let conf = SntpConf {
+        servers: DEFAULT_SNTP_SERVERS,
+        operating_mode: OperatingMode::Poll,
+        sync_mode: SyncMode::Immediate,
+    };
+    let ntp = EspSntp::new(&conf)?;
+    for i in 0..15 {
+        if ntp.get_sync_status() == SyncStatus::Completed {
+            info!("SNTP sync completed");
+            return Ok(());
+        }
+        info!("sntp waiting ({})", i);
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    Err(anyhow::anyhow!("SNTP sync timeout"))
 }

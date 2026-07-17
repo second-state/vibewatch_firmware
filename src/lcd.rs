@@ -28,7 +28,7 @@ pub struct TouchPoint {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TouchEvent {
     Press(TouchPoint),
-    Release,
+    Release(TouchPoint),
 }
 
 pub fn init() -> anyhow::Result<()> {
@@ -71,9 +71,11 @@ pub fn start_touch_worker(tx: tokio::sync::mpsc::Sender<TouchEvent>) -> anyhow::
             esp_idf_svc::hal::task::block_on(wait_touch_interrupt());
 
             let mut logged_press = false;
+            let mut last_touch = None;
             loop {
                 match read_touch() {
                     Some(touch) => {
+                        last_touch = Some(touch);
                         if !logged_press {
                             log::info!(
                                 "Touch detected: x={} y={} strength={}",
@@ -92,8 +94,10 @@ pub fn start_touch_worker(tx: tokio::sync::mpsc::Sender<TouchEvent>) -> anyhow::
                         if logged_press {
                             log::info!("Touch released");
                         }
-                        if tx.try_send(TouchEvent::Release).is_err() {
-                            return;
+                        if let Some(touch) = last_touch {
+                            if tx.try_send(TouchEvent::Release(touch)).is_err() {
+                                return;
+                            }
                         }
                         break;
                     }
