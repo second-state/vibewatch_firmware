@@ -391,6 +391,11 @@ const ALPHA: f32 = 0.5;
 const MENU_ITEM_H: u16 = 66;
 const MENU_START_Y: u16 = 30;
 const MENU_FONT_H: u16 = 17;
+const MENU_FOOTER_H: i32 = 24;
+
+fn build_version_label() -> &'static str {
+    option_env!("VIBEKEYS_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
 const TERMINAL_SCROLL_ROWS: usize = 10;
 const TERMINAL_SCROLLBACK_ROWS: usize = 64;
 
@@ -1024,6 +1029,17 @@ impl UI {
         )
         .draw(display)?;
 
+        Text::with_alignment(
+            build_version_label(),
+            Point::new((DISPLAY_WIDTH / 2) as i32, DISPLAY_HEIGHT as i32 - 6),
+            U8g2TextStyle::new(
+                u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
+                ColorFormat::CSS_GRAY,
+            ),
+            Alignment::Center,
+        )
+        .draw(display)?;
+
         let mut item_rects = Vec::new();
         for item in items {
             if item.rect.top_left.y + item.rect.size.height as i32 > DISPLAY_HEIGHT as i32 {
@@ -1092,7 +1108,7 @@ impl UI {
             .enumerate()
             .filter_map(|(i, (label, is_working))| {
                 let item_top = MENU_START_Y as i32 + (i as i32) * MENU_ITEM_H as i32;
-                if item_top + MENU_ITEM_H as i32 > DISPLAY_HEIGHT as i32 {
+                if item_top + MENU_ITEM_H as i32 > DISPLAY_HEIGHT as i32 - MENU_FOOTER_H {
                     return None;
                 }
 
