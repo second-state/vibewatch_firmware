@@ -28,6 +28,7 @@ fn main() -> anyhow::Result<()> {
     let setting = setting::Setting::load_from_nvs(&nvs)?;
     let asr_config = audio::AsrConfig::load_from_nvs(&nvs);
     let audio_prompt = audio::Prompt::load_from_nvs(&nvs);
+    let audio_prompt_enabled = audio::prompt_enabled(&nvs);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -155,6 +156,8 @@ fn main() -> anyhow::Result<()> {
         asr_tx,
         asr_config.as_ref(),
         audio_prompt.as_ref(),
+        audio_prompt_enabled,
+        &nvs,
     ));
     log::info!("remote exited: {:?}", r);
 

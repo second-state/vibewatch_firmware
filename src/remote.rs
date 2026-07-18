@@ -50,6 +50,8 @@ pub async fn run(
     asr_tx: std::sync::mpsc::Sender<audio::AsrRequest>,
     asr_config: Option<&audio::AsrConfig>,
     audio_prompt: Option<&audio::Prompt>,
+    mut audio_prompt_enabled: bool,
+    nvs: &esp_idf_svc::nvs::EspDefaultNvs,
 ) -> anyhow::Result<()> {
     log::info!("Connecting to MQTT broker {uri} as {client_id}");
     let mut server = match MqttServer::new(&uri, &client_id).await {
@@ -73,6 +75,8 @@ pub async fn run(
         &mut boot_button,
         &mut backlight,
         audio_prompt,
+        &mut audio_prompt_enabled,
+        nvs,
     )
     .await?;
 
@@ -118,6 +122,8 @@ pub async fn run(
                                     &mut boot_button,
                                     &mut backlight,
                                     audio_prompt,
+                                    &mut audio_prompt_enabled,
+                                    nvs,
                                 )
                                 .await?;
                             } else if let Some(msg) = scroll_swipe_message(start, touch) {
@@ -237,6 +243,7 @@ enum BootMenuAction {
     PowerOff,
     ScreenOff,
     RestoreScreen,
+    ToggleSound,
     Back,
 }
 
@@ -244,13 +251,20 @@ async fn show_boot_menu(
     server: &mut MqttServer,
     gui: &mut UI,
     touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    audio_prompt_enabled: bool,
 ) -> anyhow::Result<BootMenuAction> {
+    let sound_label = if audio_prompt_enabled {
+        "Sound Off"
+    } else {
+        "Sound On"
+    };
     let items = vec![
         boot_menu_item(0, "Reboot", crate::ui::UiColor::CSS_DARK_ORANGE),
         boot_menu_item(1, "Power Off", crate::ui::UiColor::CSS_RED),
         boot_menu_item(2, "Screen Off", crate::ui::UiColor::CSS_GRAY),
         boot_menu_item(3, "Restore", crate::ui::UiColor::CSS_DARK_BLUE),
-        boot_menu_item(4, "Back", crate::ui::UiColor::CSS_BLACK),
+        boot_menu_item(4, sound_label, crate::ui::UiColor::CSS_GREEN),
+        boot_menu_item(5, "Back", crate::ui::UiColor::CSS_BLACK),
     ];
     let index = select_remote_list_item(server, gui, touch_rx, "System", &items).await?;
     Ok(match index {
@@ -258,7 +272,8 @@ async fn show_boot_menu(
         1 => BootMenuAction::PowerOff,
         2 => BootMenuAction::ScreenOff,
         3 => BootMenuAction::RestoreScreen,
-        4 => BootMenuAction::Back,
+        4 => BootMenuAction::ToggleSound,
+        5 => BootMenuAction::Back,
         _ => unreachable!(),
     })
 }
@@ -872,6 +887,8 @@ async fn open_session_picker(
     boot_button: &mut BootButton,
     backlight: &mut BacklightMode,
     audio_prompt: Option<&audio::Prompt>,
+    audio_prompt_enabled: &mut bool,
+    nvs: &esp_idf_svc::nvs::EspDefaultNvs,
 ) -> anyhow::Result<()> {
     // 入口:retained presence 在 subscribe 后很快到达,但需 poll recv 才进 sessions 表。
     // 最多等 1500ms 让它们落地。
@@ -942,7 +959,7 @@ async fn open_session_picker(
             }
             _ = crate::boot::wait_boot_press(boot_button) => {
                 log::info!("BOOT menu requested from session list");
-                match show_boot_menu(server, gui, touch_rx).await? {
+                match show_boot_menu(server, gui, touch_rx, *audio_prompt_enabled).await? {
                     BootMenuAction::Restart => {
                         log::warn!("BOOT menu restart selected");
                         esp_idf_svc::hal::reset::restart();
@@ -970,6 +987,20 @@ async fn open_session_picker(
                         off_since = None;
                         last_list_change = tokio::time::Instant::now();
                         next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
+                        last_session_title = render_session_picker(
+                            server,
+                            gui,
+                            &mut labels,
+                            &mut item_rects,
+                            scroll_offset,
+                        );
+                    }
+                    BootMenuAction::ToggleSound => {
+                        *audio_prompt_enabled = !*audio_prompt_enabled;
+                        if let Err(e) = audio::save_prompt_enabled(nvs, *audio_prompt_enabled) {
+                            log::error!("Failed to save sound setting: {e:?}");
+                        }
+                        log::info!("Audio prompt enabled={}", *audio_prompt_enabled);
                         last_session_title = render_session_picker(
                             server,
                             gui,
@@ -1068,8 +1099,10 @@ async fn open_session_picker(
                             last_list_change = tokio::time::Instant::now();
                             next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
                             backlight.set(BacklightMode::Normal)?;
-                            if let Some(prompt) = audio_prompt {
-                                prompt.play_async();
+                            if *audio_prompt_enabled {
+                                if let Some(prompt) = audio_prompt {
+                                    prompt.play_async();
+                                }
                             }
                             off_since = None;
                             scroll_offset = clamp_session_scroll_offset(server, scroll_offset, item_rects.len().max(1));

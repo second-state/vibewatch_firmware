@@ -7,6 +7,7 @@ use embedded_svc::io::Write;
 
 pub const SAMPLE_RATE: u32 = 16000;
 pub const PROMPT_PCM_KEY: &str = "audio_pcm";
+const PROMPT_ENABLED_KEY: &str = "audio_prompt_on";
 
 extern "C" {
     fn board_audio_init() -> std::ffi::c_int;
@@ -61,6 +62,22 @@ pub fn write_speaker_bytes(bytes: &[u8]) -> anyhow::Result<usize> {
     }
 
     Ok(written as usize)
+}
+
+pub fn prompt_enabled(nvs: &esp_idf_svc::nvs::EspDefaultNvs) -> bool {
+    nvs.get_u8(PROMPT_ENABLED_KEY)
+        .ok()
+        .flatten()
+        .map(|value| value != 0)
+        .unwrap_or(true)
+}
+
+pub fn save_prompt_enabled(
+    nvs: &esp_idf_svc::nvs::EspDefaultNvs,
+    enabled: bool,
+) -> anyhow::Result<()> {
+    nvs.set_u8(PROMPT_ENABLED_KEY, u8::from(enabled))?;
+    Ok(())
 }
 
 fn esp_result(context: &str, code: i32) -> anyhow::Result<()> {
