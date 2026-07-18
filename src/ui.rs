@@ -15,7 +15,6 @@ use embedded_text::TextBox;
 use u8g2_fonts::U8g2TextStyle;
 
 const GIF_IMG: &[u8] = include_bytes!("../assets/ht.gif");
-const TERMINAL_ANS: &str = include_str!("../../embedded-graphics-terminal/vibetty.ans");
 
 pub type UiColor = Rgb565;
 type ColorFormat = UiColor;
@@ -291,77 +290,6 @@ pub fn ui_background() -> Result<(), std::convert::Infallible> {
     Ok(())
 }
 
-pub fn render_terminal_ans_demo() -> anyhow::Result<()> {
-    use embedded_graphics_terminal::TerminalRenderer;
-    use u8g2_fonts::fonts::{
-        u8g2_font_unifont_t_78_79, u8g2_font_unifont_t_gb2312, u8g2_font_unifont_t_symbols,
-    };
-    use vt100::Parser;
-
-    let mut display = FastFramebuffer::new();
-
-    let mut renderer = TerminalRenderer::new(
-        display.size(),
-        u8g2_font_unifont_t_gb2312,
-        ColorFormat::WHITE,
-        ColorFormat::BLACK,
-    )
-    .with_fallback_font(u8g2_font_unifont_t_symbols)
-    .with_fallback_font(u8g2_font_unifont_t_78_79);
-    let (cell_w, cell_h) = renderer.cell_size();
-    log::info!(
-        "Terminal renderer: {}x{} cells, cell={}x{}, ansi={} bytes",
-        renderer.cols(),
-        renderer.rows(),
-        cell_w,
-        cell_h,
-        TERMINAL_ANS.len()
-    );
-
-    for frame in 1..=2 {
-        display.clear(ColorFormat::BLACK)?;
-
-        let parse_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
-        let mut parser = Parser::new(renderer.rows(), renderer.cols(), 0);
-        parser.process(TERMINAL_ANS.as_bytes());
-        let parse_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - parse_start_us;
-
-        let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
-        renderer.render(parser.screen(), &mut display)?;
-        let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
-        let total_elapsed_us = parse_elapsed_us + render_elapsed_us;
-        log::info!(
-            "Terminal frame {} ANSI to framebuffer took {} us ({:.2} ms): parse={} us, render={} us",
-            frame,
-            total_elapsed_us,
-            total_elapsed_us as f32 / 1000.0,
-            parse_elapsed_us,
-            render_elapsed_us
-        );
-
-        let flush_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
-        let e = crate::lcd::flush_display(
-            display.data(),
-            0,
-            0,
-            crate::lcd::LCD_WIDTH as i32,
-            crate::lcd::LCD_HEIGHT as i32,
-        );
-        let flush_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - flush_start_us;
-        log::info!(
-            "Terminal frame {} framebuffer flush took {} us ({:.2} ms)",
-            frame,
-            flush_elapsed_us,
-            flush_elapsed_us as f32 / 1000.0
-        );
-        if e != 0 {
-            log::warn!("flush terminal demo frame {frame} error: {e}");
-        }
-    }
-
-    Ok(())
-}
-
 fn new_terminal_renderer() -> embedded_graphics_terminal::TerminalRenderer {
     use embedded_graphics_terminal::TerminalRenderer;
     use u8g2_fonts::fonts::{
@@ -464,7 +392,11 @@ pub async fn main_menu(
         ("Remote".to_string(), false),
         ("Setting".to_string(), false),
     ];
-    let index = select_menu_item(gui, touch_rx, "Main Menu", &items).await?;
+    let title = match crate::power::battery_percent() {
+        Some(percent) => format!("Main: Battery {percent}%"),
+        None => "Main: Battery --".to_string(),
+    };
+    let index = select_menu_item(gui, touch_rx, &title, &items).await?;
     Ok(match index {
         0 => MainMenuSelection::Remote,
         1 => MainMenuSelection::Setting,
@@ -1016,14 +948,14 @@ impl UI {
         crate::lcd::clear();
 
         let display = self.display.as_mut();
-        display.clear(ColorFormat::WHITE)?;
+        display.clear(ColorFormat::CSS_BLACK)?;
 
         Text::with_alignment(
             title,
             Point::new((DISPLAY_WIDTH / 2) as i32, 18),
             U8g2TextStyle::new(
                 u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
-                ColorFormat::CSS_DARK_BLUE,
+                ColorFormat::CSS_WHITE,
             ),
             Alignment::Center,
         )

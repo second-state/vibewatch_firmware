@@ -14,6 +14,23 @@ pub fn init() -> anyhow::Result<()> {
     esp_err("board_pmu_init", unsafe { board_pmu_init() })
 }
 
+pub fn init_cpu_frequency_scaling() -> anyhow::Result<()> {
+    let config = esp_idf_svc::sys::esp_pm_config_t {
+        max_freq_mhz: 240,
+        min_freq_mhz: 40,
+        light_sleep_enable: false,
+    };
+    let code = unsafe { esp_idf_svc::sys::esp_pm_configure((&config as *const _) as *const _) };
+    esp_err("esp_pm_configure", code)?;
+    log::info!(
+        "CPU dynamic frequency scaling enabled: {}-{} MHz, light_sleep={}",
+        config.min_freq_mhz,
+        config.max_freq_mhz,
+        config.light_sleep_enable
+    );
+    Ok(())
+}
+
 pub fn start_power_key_worker() {
     if POWER_WORKER_STARTED.swap(true, Ordering::SeqCst) {
         return;

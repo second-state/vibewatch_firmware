@@ -18,6 +18,7 @@ mod util;
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
+    power::init_cpu_frequency_scaling()?;
 
     let peripherals = esp_idf_svc::hal::peripherals::Peripherals::take().unwrap();
     let sysloop = EspSystemEventLoop::take()?;
@@ -47,9 +48,6 @@ fn main() -> anyhow::Result<()> {
     // ===
 
     ui::ui_background().ok();
-    if let Err(e) = ui::render_terminal_ans_demo() {
-        log::warn!("terminal ans demo failed: {e:?}");
-    }
     let mut gui = ui::UI::default();
 
     // A/B 双槽 OTA:标记当前启动槽为有效(确认本次正常启动;配合回滚机制)。

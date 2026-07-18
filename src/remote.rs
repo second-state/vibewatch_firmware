@@ -17,12 +17,14 @@ use crate::{
 const BACKLIGHT_NORMAL: u8 = 50;
 const BACKLIGHT_DIM: u8 = 10;
 const SESSION_LIST_IDLE_DIM_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+const SESSION_LIST_IDLE_OFF_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 const SESSION_LIST_TITLE_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BacklightMode {
     Normal,
     Dim,
+    Off,
 }
 
 impl BacklightMode {
@@ -33,6 +35,7 @@ impl BacklightMode {
         let level = match mode {
             Self::Normal => BACKLIGHT_NORMAL,
             Self::Dim => BACKLIGHT_DIM,
+            Self::Off => 0,
         };
         crate::lcd::set_backlight(level)?;
         *self = mode;
@@ -820,7 +823,7 @@ async fn open_session_picker(
     let mut next_title_refresh = last_list_change + SESSION_LIST_TITLE_REFRESH_DELAY;
     loop {
         tokio::select! {
-            _ = tokio::time::sleep_until(next_title_refresh) => {
+            _ = tokio::time::sleep_until(next_title_refresh), if *backlight != BacklightMode::Off => {
                 next_title_refresh = tokio::time::Instant::now() + SESSION_LIST_TITLE_REFRESH_DELAY;
                 render_session_picker(
                     server,
@@ -830,9 +833,13 @@ async fn open_session_picker(
                     scroll_offset,
                 );
             }
-            _ = tokio::time::sleep_until(last_list_change + SESSION_LIST_IDLE_DIM_DELAY), if *backlight != BacklightMode::Dim => {
+            _ = tokio::time::sleep_until(last_list_change + SESSION_LIST_IDLE_DIM_DELAY), if *backlight == BacklightMode::Normal => {
                 log::info!("Session list unchanged for 30s, dimming screen");
                 backlight.set(BacklightMode::Dim)?;
+            }
+            _ = tokio::time::sleep_until(last_list_change + SESSION_LIST_IDLE_OFF_DELAY), if *backlight != BacklightMode::Off => {
+                log::info!("Session list unchanged for 60s, turning screen off");
+                backlight.set(BacklightMode::Off)?;
             }
             _ = crate::boot::wait_boot_press(boot_button) => {
                 log::info!("BOOT menu requested from session list");
@@ -861,6 +868,7 @@ async fn open_session_picker(
                     BootMenuAction::RestoreScreen => {
                         backlight.set(BacklightMode::Normal)?;
                         last_list_change = tokio::time::Instant::now();
+                        next_title_refresh = last_list_change + SESSION_LIST_TITLE_REFRESH_DELAY;
                         render_session_picker(
                             server,
                             gui,
@@ -881,6 +889,23 @@ async fn open_session_picker(
                 }
             }
             event = touch_rx.recv() => {
+                if matches!(event, Some(lcd::TouchEvent::Press(_)) | Some(lcd::TouchEvent::Release(_)))
+                    && *backlight == BacklightMode::Off
+                {
+                    log::info!("Touch while screen is off, restoring backlight");
+                    backlight.set(BacklightMode::Normal)?;
+                    last_list_change = tokio::time::Instant::now();
+                    next_title_refresh = last_list_change + SESSION_LIST_TITLE_REFRESH_DELAY;
+                    press_touch = None;
+                    render_session_picker(
+                        server,
+                        gui,
+                        &mut labels,
+                        &mut item_rects,
+                        scroll_offset,
+                    );
+                    continue;
+                }
                 match event {
                     Some(lcd::TouchEvent::Press(touch)) => {
                         if press_touch.is_none() {
@@ -920,6 +945,7 @@ async fn open_session_picker(
                             let index = scroll_offset + visible_index;
                             if let Some((prefix, ..)) = labels.get(index) {
                                 let prefix = prefix.clone();
+                                backlight.set(BacklightMode::Normal)?;
                                 server.set_active(&prefix);
                                 send_active_sync(server, false).await?;
                                 return Ok(());
@@ -938,6 +964,7 @@ async fn open_session_picker(
                     Some(MqttEvent::Presence { list_changed, .. }) => {
                         if list_changed {
                             last_list_change = tokio::time::Instant::now();
+                            next_title_refresh = last_list_change + SESSION_LIST_TITLE_REFRESH_DELAY;
                             backlight.set(BacklightMode::Normal)?;
                             scroll_offset = clamp_session_scroll_offset(server, scroll_offset, item_rects.len().max(1));
                             render_session_picker(
