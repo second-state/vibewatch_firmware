@@ -1,12 +1,20 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use embedded_svc::io::Write;
 
 pub const SAMPLE_RATE: u32 = 16000;
+pub const PROMPT_PCM_KEY: &str = "audio_pcm";
 
 extern "C" {
     fn board_audio_init() -> std::ffi::c_int;
     fn board_audio_read_mic(data: *mut std::ffi::c_void, len: std::ffi::c_int) -> std::ffi::c_int;
+    fn board_audio_write_speaker(
+        data: *const std::ffi::c_void,
+        len: std::ffi::c_int,
+    ) -> std::ffi::c_int;
 }
 
 pub fn init() -> anyhow::Result<()> {
@@ -37,12 +45,94 @@ pub fn read_mic_i16(samples: &mut [i16]) -> anyhow::Result<usize> {
     Ok(read as usize / std::mem::size_of::<i16>())
 }
 
+pub fn write_speaker_bytes(bytes: &[u8]) -> anyhow::Result<usize> {
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+    if bytes.len() > std::ffi::c_int::MAX as usize {
+        anyhow::bail!("speaker buffer length exceeds C int range");
+    }
+
+    let written =
+        unsafe { board_audio_write_speaker(bytes.as_ptr().cast(), bytes.len() as std::ffi::c_int) };
+    if written < 0 {
+        esp_result("board_audio_write_speaker", written)?;
+        unreachable!();
+    }
+
+    Ok(written as usize)
+}
+
 fn esp_result(context: &str, code: i32) -> anyhow::Result<()> {
     if code == esp_idf_svc::sys::ESP_OK as i32 {
         Ok(())
     } else {
         Err(anyhow::anyhow!("{context} failed: esp_err_t={code}"))
     }
+}
+
+#[derive(Clone)]
+pub struct Prompt {
+    pcm: Arc<Vec<u8>>,
+    playing: Arc<AtomicBool>,
+}
+
+impl Prompt {
+    pub fn load_from_nvs(nvs: &esp_idf_svc::nvs::EspDefaultNvs) -> Option<Self> {
+        let len = nvs.blob_len(PROMPT_PCM_KEY).ok()??;
+        if len == 0 {
+            return None;
+        }
+
+        let mut pcm = vec![0u8; len];
+        let pcm = nvs.get_blob(PROMPT_PCM_KEY, &mut pcm).ok()??;
+        if pcm.len() % 2 != 0 {
+            log::error!("Invalid audio prompt PCM length: {}B", pcm.len());
+            return None;
+        }
+        log::info!("Loaded audio prompt: {}B PCM", pcm.len());
+        Some(Self {
+            pcm: Arc::new(pcm.to_vec()),
+            playing: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    pub fn play_async(&self) {
+        if self
+            .playing
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            log::debug!("Audio prompt already playing, skipping");
+            return;
+        }
+        let pcm = self.pcm.clone();
+        let playing = self.playing.clone();
+        if let Err(e) = std::thread::Builder::new()
+            .name("audio-prompt".to_string())
+            .stack_size(4096)
+            .spawn(move || {
+                if let Err(e) = play_pcm(&pcm) {
+                    log::error!("Audio prompt playback failed: {e:?}");
+                }
+                playing.store(false, Ordering::Release);
+            })
+        {
+            log::error!("Failed to spawn audio prompt thread: {e:?}");
+            self.playing.store(false, Ordering::Release);
+        }
+    }
+}
+
+fn play_pcm(pcm: &[u8]) -> anyhow::Result<()> {
+    const CHUNK_BYTES: usize = 2048;
+    for chunk in pcm.chunks(CHUNK_BYTES) {
+        let written = write_speaker_bytes(chunk)?;
+        if written != chunk.len() {
+            anyhow::bail!("short speaker write: {}B/{}B", written, chunk.len());
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

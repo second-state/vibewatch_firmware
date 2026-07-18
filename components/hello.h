@@ -21,6 +21,7 @@ int board_pmu_shutdown(void);
 int board_pmu_battery_percent(void);
 int board_audio_init(void);
 int board_audio_read_mic(void *data, int len);
+int board_audio_write_speaker(const void *data, int len);
 int board_audio_sample_rate(void);
 
 #ifdef __cplusplus

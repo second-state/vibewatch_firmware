@@ -27,6 +27,7 @@ fn main() -> anyhow::Result<()> {
     let nvs = esp_idf_svc::nvs::EspDefaultNvs::new(partition, "setting", true)?;
     let setting = setting::Setting::load_from_nvs(&nvs)?;
     let asr_config = audio::AsrConfig::load_from_nvs(&nvs);
+    let audio_prompt = audio::Prompt::load_from_nvs(&nvs);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -153,6 +154,7 @@ fn main() -> anyhow::Result<()> {
         boot_button,
         asr_tx,
         asr_config.as_ref(),
+        audio_prompt.as_ref(),
     ));
     log::info!("remote exited: {:?}", r);
 

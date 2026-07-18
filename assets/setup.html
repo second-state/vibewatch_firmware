@@ -1,176 +1,702 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
+<!-- VibeKeys Setup Page (Copy from https://github.com/second-state/vibekeys_firmware) -->
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Watch Setup</title>
-    <style>
-        body {
-            font-family: system-ui, sans-serif;
-            max-width: 480px;
-            margin: 20px auto;
-            padding: 0 16px;
-        }
-
-        h2 {
-            margin-bottom: 4px;
-        }
-
-        .hint {
-            color: #666;
-            font-size: 13px;
-            margin: 0 0 16px;
-        }
-
-        label {
-            display: block;
-            margin: 12px 0 4px;
-        }
-
-        input {
-            width: 100%;
-            padding: 9px;
-            font-size: 16px;
-            box-sizing: border-box;
-        }
-
-        .wifi-row {
-            display: flex;
-            gap: 6px;
-            margin: 6px 0;
-        }
-
-        .wifi-row input.ssid {
-            flex: 3;
-        }
-
-        .wifi-row input.pass {
-            flex: 3;
-        }
-
-        .wifi-row button {
-            flex: 0 0 auto;
-            padding: 9px 12px;
-            background: #eee;
-            border: 0;
-            border-radius: 6px;
-        }
-
-        #add {
-            margin: 6px 0;
-            padding: 8px 12px;
-            background: #eee;
-            border: 0;
-            border-radius: 6px;
-        }
-
-        button#go {
-            margin-top: 22px;
-            padding: 13px;
-            width: 100%;
-            font-size: 16px;
-            background: #0a7;
-            color: #fff;
-            border: 0;
-            border-radius: 8px;
-        }
-
-        button#go:disabled {
-            background: #999;
-        }
-
-        #log {
-            margin-top: 20px;
-            white-space: pre-wrap;
-            font-family: ui-monospace, monospace;
-            font-size: 13px;
-            background: #f4f4f4;
-            padding: 10px;
-            border-radius: 8px;
-            min-height: 20px;
-        }
-    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Setup VibeKeys</title>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5/themes.css" rel="stylesheet" type="text/css" />
 </head>
 
-<body>
-    <h2>Watch Setup</h2>
-    <p class="hint">手机用 Chrome / Edge / Bluefy 打开本页,按优先级填好 WiFi 列表 + MQTT broker,点连接,手表会自动重启联网。</p>
+<body class="bg-base-200 min-h-screen py-8 bg-cover bg-center bg-no-repeat bg-fixed">
+    <div class="container mx-auto px-4 max-w-4xl">
+        <div class="card bg-base-100 shadow-xl">
+            <div class="card-body">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="card-title text-2xl">Setup VibeKeys via Bluetooth</h2>
+                    <div class="flex items-center gap-2">
+                        <span class="badge badge-error" id="statusIndicator">●</span>
+                        <span id="connectionStatus">Disconnected</span>
+                    </div>
+                </div>
 
-    <label>WiFi 列表(顺序 = 连接优先级)</label>
-    <div id="wifis"></div>
-    <button id="add" type="button">+ Add WiFi</button>
+                <button class="btn btn-primary w-full mb-4" id="connectButton">
+                    Connect to VibeKeys
+                </button>
 
-    <label>MQTT broker</label>
-    <input id="url" type="text" placeholder="mqtt://192.168.1.10:1883">
+                <div id="controlPanel" class="space-y-4">
+                    <div class="flex gap-2">
+                        <button class="btn btn-outline flex-1" id="loadAllButton">
+                            🔄 Load Configuration
+                        </button>
+                        <button class="btn btn-primary flex-1" id="saveAllButton" disabled>
+                            💾 Save Changes
+                        </button>
+                    </div>
 
-    <button id="go">Connect &amp; Save</button>
-    <div id="log"></div>
+                    <div class="card bg-base-100 border border-base-300">
+                        <div class="card-body">
+                            <div class="flex justify-between items-center">
+                                <h3 class="card-title text-lg" id="wifiTitle">WiFi networks (2.4GHz)</h3>
+                                <button class="btn btn-xs btn-outline" id="addWifiButton">+ Add</button>
+                            </div>
+                            <p class="text-xs opacity-70">Device connects to the first listed
+                                network that is in range.</p>
+                            <div id="wifiListContainer" class="space-y-3"></div>
+                        </div>
+                    </div>
+
+                    <div class="card bg-base-100 border border-base-300">
+                        <div class="card-body">
+                            <h3 class="card-title text-lg" id="urlTitle">VibeKeys Server</h3>
+                            <label class="form-control">
+                                <div class="label">
+                                    <span class="label-text">WebSocket URL</span>
+                                </div>
+                                <input type="text" id="serverUrlInput" placeholder="VibeKeys server WebSocket URL"
+                                    class="input input-bordered w-full">
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="card bg-base-100 border border-base-300">
+                        <div class="card-body">
+                            <h3 class="card-title text-lg" id="asrTitle">ASR (Speech Recognition)</h3>
+                            <p class="text-xs opacity-70">Whisper-compatible endpoint. Sent on save, applied after
+                                device reset.</p>
+                            <label class="form-control">
+                                <div class="label">
+                                    <span class="label-text">Endpoint URI</span>
+                                </div>
+                                <input type="text" id="asrUriInput"
+                                    placeholder="https://host/audio/transcriptions"
+                                    class="input input-bordered w-full">
+                            </label>
+                            <label class="form-control">
+                                <div class="label">
+                                    <span class="label-text">API Key</span>
+                                </div>
+                                <input type="password" id="asrApiKeyInput" placeholder="Bearer token (optional)"
+                                    class="input input-bordered w-full">
+                            </label>
+                            <label class="form-control">
+                                <div class="label">
+                                    <span class="label-text">Model</span>
+                                </div>
+                                <input type="text" id="asrModelInput" placeholder="whisper-1"
+                                    class="input input-bordered w-full">
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="card bg-base-100 border border-base-300">
+                        <div class="card-body">
+                            <h3 class="card-title text-lg">Audio Prompt</h3>
+                            <p class="text-xs opacity-70">Upload one WAV file. It is decoded to 16kHz mono PCM before
+                                sending. Maximum PCM size: 256KB.</p>
+                            <label class="form-control">
+                                <div class="label">
+                                    <span class="label-text">WAV file</span>
+                                </div>
+                                <input type="file" id="audioFileInput" accept=".wav,audio/wav,audio/x-wav"
+                                    class="file-input file-input-bordered w-full">
+                                <div class="label">
+                                    <span class="label-text-alt" id="audioFileStatus">No file selected</span>
+                                </div>
+                            </label>
+                            <button class="btn btn-outline w-full" id="uploadAudioButton" disabled>
+                                Upload Audio
+                            </button>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Notification toast -->
+    <div class="toast toast-top toast-end z-50" id="toastContainer">
+        <div class="alert" id="notificationToast" style="display: none;">
+            <span id="toastMessage">Message content</span>
+        </div>
+    </div>
+
+    <!-- Reset not supported modal dialog -->
+    <dialog id="resetNotSupportedModal" class="modal">
+        <div class="modal-box">
+            <h3 class="font-bold text-lg">⚠️ Device Reset Required</h3>
+            <p class="py-4">Please press the k0 key on the device to restart it.</p>
+            <div class="modal-action">
+                <form method="dialog">
+                    <button class="btn btn-primary">OK</button>
+                </form>
+            </div>
+        </div>
+    </dialog>
 
     <script>
-        // 与固件 src/ble_provision.rs 保持一致
+        // UUIDs
         const SERVICE_ID = "623fa3e2-631b-4f8f-a6e7-a7b09c03e7e0";
-        const CONFIG_ID  = "cef520a9-bcb5-4fc6-87f7-82804eee2b20";
-        const RESET_ID   = "f0e1d2c3-b4a5-6789-0abc-def123456789";
+        // 所有配置项复用同一个 CONFIG 特征值:
+        // 写入为 JSON {"wifi_list":[...], "server_url":"...", "asr_config":{...}},读取返回整份快照。
+        const CONFIG_ID = "cef520a9-bcb5-4fc6-87f7-82804eee2b20";
+        const AUDIO_ID = "a8ef1f04-b6e8-4d7b-bd40-6f2ebcbb2f49";
+        const RESET_ID = "f0e1d2c3-b4a5-6789-0abc-def123456789";
+        const MAX_AUDIO_BYTES = 256 * 1024;
 
-        const logEl = document.getElementById('log');
-        const log = (...a) => { logEl.textContent += a.join(' ') + '\n'; };
-        const wifisEl = document.getElementById('wifis');
+        // global variables
+        let device = null;
+        let server = null;
+        let service = null;
+        let isConnected = false;
+        let skipAutoLoad = false;
 
-        function addRow(ssid = '', pass = '') {
-            const row = document.createElement('div');
-            row.className = 'wifi-row';
-            row.innerHTML =
-                `<input class="ssid" type="text" placeholder="SSID" value="${ssid.replace(/"/g, '&quot;')}">` +
-                `<input class="pass" type="password" placeholder="password" value="${pass.replace(/"/g, '&quot;')}">` +
-                `<button type="button" class="del">x</button>`;
-            row.querySelector('.del').onclick = () => row.remove();
-            wifisEl.appendChild(row);
+        // WiFi 列表(整份经 CONFIG 特征值读写)。顺序即连接优先级。
+        let wifiList = []; // [{ ssid: '', pass: '' }, ...]
+        const WIFI_TITLE_BASE = 'WiFi networks (2.4GHz)';
+
+        // DOM
+        const connectButton = document.getElementById('connectButton');
+        const controlPanel = document.getElementById('controlPanel');
+        const statusIndicator = document.getElementById('statusIndicator');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const loadAllButton = document.getElementById('loadAllButton');
+        const saveAllButton = document.getElementById('saveAllButton');
+        const wifiListContainer = document.getElementById('wifiListContainer');
+        const addWifiButton = document.getElementById('addWifiButton');
+        const wifiTitle = document.getElementById('wifiTitle');
+        const serverUrlInput = document.getElementById('serverUrlInput');
+        const urlTitle = document.getElementById('urlTitle');
+        const asrTitle = document.getElementById('asrTitle');
+        const asrUriInput = document.getElementById('asrUriInput');
+        const asrApiKeyInput = document.getElementById('asrApiKeyInput');
+        const asrModelInput = document.getElementById('asrModelInput');
+        const audioFileInput = document.getElementById('audioFileInput');
+        const audioFileStatus = document.getElementById('audioFileStatus');
+        const uploadAudioButton = document.getElementById('uploadAudioButton');
+        const notificationToast = document.getElementById('notificationToast');
+        const toastMessage = document.getElementById('toastMessage');
+        const resetNotSupportedModal = document.getElementById('resetNotSupportedModal');
+
+        // Track modified fields
+        const modifiedFields = {
+            wifi: false,
+            url: false,
+            asr: false
+        };
+
+        // Mark the whole wifi list as modified
+        function markWifiModified() {
+            modifiedFields.wifi = true;
+            if (wifiTitle && !wifiTitle.textContent.endsWith(' *')) {
+                wifiTitle.textContent = WIFI_TITLE_BASE + ' *';
+            }
+            updateSaveButtonState();
         }
 
-        addRow();
-        document.getElementById('add').onclick = () => addRow();
-
-        document.getElementById('go').onclick = async () => {
-            const btn = document.getElementById('go');
-            btn.disabled = true;
-            logEl.textContent = '';
-            try {
-                const wifi_list = [...wifisEl.querySelectorAll('.wifi-row')]
-                    .map(r => ({
-                        ssid: r.querySelector('.ssid').value.trim(),
-                        pass: r.querySelector('.pass').value,
-                    }))
-                    .filter(c => c.ssid);
-                const server_url = document.getElementById('url').value.trim();
-
-                if (wifi_list.length === 0) { log('Add at least one WiFi.'); return; }
-                if (!server_url) { log('MQTT broker is empty.'); return; }
-
-                log('Selecting BLE device...');
-                const device = await navigator.bluetooth.requestDevice({
-                    filters: [{ services: [SERVICE_ID] }],
-                });
-                log('Connecting to ' + device.name + ' ...');
-                const server = await device.gatt.connect();
-                const service = await server.getPrimaryService(SERVICE_ID);
-
-                const payload = new TextEncoder().encode(JSON.stringify({ wifi_list, server_url }));
-
-                log('Writing config...');
-                const cfg = await service.getCharacteristic(CONFIG_ID);
-                await cfg.writeValue(payload);
-                log('Config saved. Sending RESET...');
-
-                const rst = await service.getCharacteristic(RESET_ID);
-                await rst.writeValue(new TextEncoder().encode('RESET'));
-                log('Done. Watch will restart and connect.');
-            } catch (e) {
-                log('ERROR: ' + (e && e.message ? e.message : e));
-            } finally {
-                btn.disabled = false;
+        // Clear wifi modification mark
+        function clearWifiModification() {
+            modifiedFields.wifi = false;
+            if (wifiTitle) {
+                wifiTitle.textContent = WIFI_TITLE_BASE;
             }
-        };
+            updateSaveButtonState();
+        }
+
+        // Rebuild the wifi row DOM from wifiList.
+        function renderWifiRows() {
+            wifiListContainer.innerHTML = '';
+            wifiList.forEach((cred, i) => {
+                const row = document.createElement('div');
+                row.className = 'flex flex-col gap-2 border border-base-300 rounded p-2';
+
+                const ssidInput = document.createElement('input');
+                ssidInput.type = 'text';
+                ssidInput.placeholder = 'Network name (SSID)';
+                ssidInput.className = 'input input-bordered input-sm w-full';
+                ssidInput.value = cred.ssid || '';
+                ssidInput.addEventListener('input', () => {
+                    wifiList[i].ssid = ssidInput.value;
+                    markWifiModified();
+                });
+
+                const passInput = document.createElement('input');
+                passInput.type = 'password';
+                passInput.placeholder = 'Password';
+                passInput.className = 'input input-bordered input-sm w-full';
+                passInput.value = cred.pass || '';
+                passInput.addEventListener('input', () => {
+                    wifiList[i].pass = passInput.value;
+                    markWifiModified();
+                });
+
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'btn btn-xs btn-error btn-outline self-end';
+                removeBtn.textContent = 'Remove';
+                removeBtn.addEventListener('click', () => {
+                    wifiList.splice(i, 1);
+                    renderWifiRows();
+                    markWifiModified();
+                });
+
+                row.appendChild(ssidInput);
+                row.appendChild(passInput);
+                row.appendChild(removeBtn);
+                wifiListContainer.appendChild(row);
+            });
+        }
+
+        // Mark field as modified
+        function markFieldAsModified(fieldName, titleElement) {
+            modifiedFields[fieldName] = true;
+            if (titleElement && !titleElement.textContent.endsWith(' *')) {
+                titleElement.textContent += ' *';
+            }
+            updateSaveButtonState();
+        }
+
+        // Clear field modification mark
+        function clearFieldModification(fieldName, titleElement) {
+            modifiedFields[fieldName] = false;
+            if (titleElement) {
+                titleElement.textContent = titleElement.textContent.replace(' *', '');
+            }
+            updateSaveButtonState();
+        }
+
+        // Update save button state
+        function updateSaveButtonState() {
+            // Save button is always enabled when connected
+        }
+
+        // display message
+        function showNotification(title, message, isError = false) {
+            toastMessage.textContent = `${title}: ${message}`;
+            notificationToast.classList.remove('alert-success', 'alert-error', 'alert-info');
+
+            if (isError) {
+                notificationToast.classList.add('alert-error');
+            } else if (title === 'Message') {
+                notificationToast.classList.add('alert-info');
+            } else {
+                notificationToast.classList.add('alert-success');
+            }
+
+            notificationToast.style.display = 'flex';
+
+            setTimeout(() => {
+                notificationToast.style.display = 'none';
+            }, 3000);
+        }
+
+        // connect
+        async function connectToDevice() {
+            try {
+                // request BT
+                device = await navigator.bluetooth.requestDevice({
+                    filters: [{ services: [SERVICE_ID] }],
+                    optionalServices: [SERVICE_ID]
+                });
+
+                // connect to GATT
+                server = await device.gatt.connect();
+                service = await server.getPrimaryService(SERVICE_ID);
+
+                // Update UI
+                isConnected = true;
+                updateConnectionStatus();
+                connectButton.textContent = 'Disconnect';
+                connectButton.classList.remove('btn-primary');
+                connectButton.classList.add('btn-error');
+
+                // Process the disconnect event
+                device.addEventListener('gattserverdisconnected', handleDisconnection);
+
+                showNotification('Success', 'Connected to VibeKeys device');
+
+                // Auto-load all configuration (skip if WiFi credentials provided via URL)
+                if (!skipAutoLoad) {
+                    await loadAllConfiguration();
+                }
+            } catch (error) {
+                console.error('Connection error:', error);
+                showNotification('Error', 'Connection error: ' + error.message, true);
+            }
+        }
+
+        // Disconnect
+        async function disconnectFromDevice() {
+            if (device && device.gatt.connected) {
+                try {
+                    await device.gatt.disconnect();
+                    showNotification('Message', 'Disconnected from VibeKeys');
+                } catch (error) {
+                    console.error('Disconnect error: ', error);
+                    showNotification('Error', 'Disconnect error: ' + error.message, true);
+                }
+            }
+        }
+
+        // process the disconnect event
+        function handleDisconnection() {
+            isConnected = false;
+            updateConnectionStatus();
+            connectButton.textContent = 'Connect to VibeKeys';
+            connectButton.classList.remove('btn-error');
+            connectButton.classList.add('btn-primary');
+            device = null;
+            server = null;
+            service = null;
+            showNotification('Message', 'VibeKeys is disconnected');
+        }
+
+        // Update the UI
+        function updateConnectionStatus() {
+            if (isConnected) {
+                statusIndicator.classList.remove('badge-error');
+                statusIndicator.classList.add('badge-success');
+                connectionStatus.textContent = 'Connected';
+                enableControls();
+            } else {
+                statusIndicator.classList.remove('badge-success');
+                statusIndicator.classList.add('badge-error');
+                connectionStatus.textContent = 'Disconnected';
+                disableControls();
+            }
+        }
+
+        // Enable all controls
+        function enableControls() {
+            loadAllButton.disabled = false;
+            saveAllButton.disabled = false;
+            serverUrlInput.disabled = false;
+            asrUriInput.disabled = false;
+            asrApiKeyInput.disabled = false;
+            asrModelInput.disabled = false;
+            audioFileInput.disabled = false;
+            uploadAudioButton.disabled = !audioFileInput.files[0];
+            controlPanel.classList.remove('opacity-50', 'pointer-events-none');
+        }
+
+        // Disable all controls
+        function disableControls() {
+            loadAllButton.disabled = true;
+            saveAllButton.disabled = true;
+            serverUrlInput.disabled = true;
+            asrUriInput.disabled = true;
+            asrApiKeyInput.disabled = true;
+            asrModelInput.disabled = true;
+            audioFileInput.disabled = true;
+            uploadAudioButton.disabled = true;
+            controlPanel.classList.add('opacity-50', 'pointer-events-none');
+        }
+
+        // Load all configuration (single read on CONFIG returns a JSON snapshot)
+        async function loadAllConfiguration() {
+            if (!isConnected || !service) {
+                showNotification('Error', 'VibeKeys is not connected', true);
+                return;
+            }
+
+            loadAllButton.disabled = true;
+            loadAllButton.textContent = 'Loading...';
+
+            try {
+                const characteristic = await service.getCharacteristic(CONFIG_ID);
+                const value = await characteristic.readValue();
+                const snap = JSON.parse(new TextDecoder().decode(value));
+                console.log('[CONFIG] snapshot:', snap);
+                wifiList = (snap.wifi_list || []).map(c => ({
+                    ssid: c.ssid || '',
+                    pass: c.pass || ''
+                }));
+                if (wifiList.length === 0) {
+                    wifiList.push({ ssid: '', pass: '' });
+                }
+                renderWifiRows();
+                serverUrlInput.value = snap.server_url || '';
+                // ASR config (Whisper): {platform, uri, api_key, model}
+                const asr = snap.asr_config || {};
+                asrUriInput.value = asr.uri || '';
+                asrApiKeyInput.value = asr.api_key || '';
+                asrModelInput.value = asr.model || '';
+
+                // Clear all modification marks
+                clearWifiModification();
+                clearFieldModification('url', urlTitle);
+                clearFieldModification('asr', asrTitle);
+
+                showNotification('Success', 'All configuration loaded');
+            } catch (error) {
+                console.error('Load configuration failed:', error);
+                showNotification('Error', 'Load configuration failed', true);
+            } finally {
+                loadAllButton.disabled = false;
+                loadAllButton.textContent = '🔄 Load Configuration';
+            }
+        }
+
+        // Save all modifications
+        async function saveAllModifications() {
+            if (!isConnected || !service) {
+                showNotification('Error', 'VibeKeys is not connected', true);
+                return;
+            }
+
+            saveAllButton.disabled = true;
+            saveAllButton.textContent = 'Saving...';
+
+            try {
+                const hasModifications = Object.values(modifiedFields).some(modified => modified);
+
+                // 过滤掉 ssid 为空的网络,避免把空条目写进设备。
+                const nonEmptyWifi = wifiList.filter(c => c.ssid && c.ssid.trim() !== '');
+
+                // 攒一个部分配置对象:无改动时发整份,有改动时只发改动的字段。
+                // 一次 writeConfigPatch 发出去,设备只更新出现的 key —— 不再逐字段发多次。
+                const include = (modified) => !hasModifications || modified;
+                const patch = {};
+                if (include(modifiedFields.wifi)) patch.wifi_list = nonEmptyWifi;
+                if (include(modifiedFields.url)) patch.server_url = serverUrlInput.value;
+                if (include(modifiedFields.asr)) patch.asr_config = buildAsrConfig();
+
+                const fieldCount = Object.keys(patch).length;
+                if (fieldCount > 0) {
+                    await writeConfigPatch(patch);
+                }
+
+                // 清掉所有改动标记
+                clearWifiModification();
+                clearFieldModification('url', urlTitle);
+                clearFieldModification('asr', asrTitle);
+
+                showNotification('Success', `Saved ${fieldCount} field(s) in 1 write`);
+
+                // Try to reset device after saving
+                try {
+                    saveAllButton.textContent = 'Resetting...';
+                    const characteristic = await service.getCharacteristic(RESET_ID);
+                    const encoder = new TextEncoder();
+                    const data = encoder.encode('RESET');
+                    await characteristic.writeValue(data);
+                    showNotification('Success', 'Device reset command sent');
+                } catch (resetError) {
+                    console.error('Reset failed:', resetError);
+                    resetNotSupportedModal.showModal();
+                }
+            } catch (error) {
+                console.error('Save modifications failed:', error);
+                showNotification('Error', 'Save modifications failed', true);
+            } finally {
+                saveAllButton.disabled = false;
+                saveAllButton.textContent = '💾 Save Changes';
+            }
+        }
+
+        // 写一个部分配置对象到 CONFIG 特征值:一次写可携带多项,设备只更新出现(非 null)的 key。
+        async function writeConfigPatch(patch) {
+            if (!isConnected || !service) {
+                throw new Error('VibeKeys is not connected');
+            }
+
+            console.log('[CONFIG] write patch:', patch);
+            const json = JSON.stringify(patch);
+
+            try {
+                const characteristic = await service.getCharacteristic(CONFIG_ID);
+                const encoder = new TextEncoder();
+                const data = encoder.encode(json);
+                await characteristic.writeValue(data);
+            } catch (error) {
+                console.error('Write error:', error);
+                throw error;
+            }
+        }
+
+        // Build the Whisper AsrConfig object from the three ASR inputs.
+        function buildAsrConfig() {
+            return {
+                platform: 'whisper',
+                uri: asrUriInput.value || '',
+                api_key: asrApiKeyInput.value || '',
+                model: asrModelInput.value || ''
+            };
+        }
+
+        function validateAudioFile(file) {
+            if (!file) {
+                throw new Error('Please select a WAV file');
+            }
+            if (file.size === 0) {
+                throw new Error('The audio file is empty');
+            }
+            if (file.size > MAX_AUDIO_BYTES) {
+                throw new Error('The audio file size cannot exceed 256KB');
+            }
+            if (!file.name.toLowerCase().endsWith('.wav')) {
+                throw new Error('Please select a .wav file');
+            }
+        }
+
+        async function decodeAudioToPcm(file) {
+            validateAudioFile(file);
+            const inputBytes = await file.arrayBuffer();
+            const header = new Uint8Array(inputBytes.slice(0, 12));
+            const riff = String.fromCharCode(...header.slice(0, 4));
+            const wave = String.fromCharCode(...header.slice(8, 12));
+            if (riff !== 'RIFF' || wave !== 'WAVE') {
+                throw new Error('Invalid WAV file header');
+            }
+
+            const context = new AudioContext();
+            let decoded;
+            try {
+                decoded = await context.decodeAudioData(inputBytes.slice(0));
+            } finally {
+                await context.close();
+            }
+
+            const length = Math.ceil(decoded.duration * 16000);
+            const offline = new OfflineAudioContext(1, length, 16000);
+            const source = offline.createBufferSource();
+            source.buffer = decoded;
+            source.connect(offline.destination);
+            source.start();
+            const rendered = await offline.startRendering();
+            const samples = rendered.getChannelData(0);
+            const pcm = new Uint8Array(samples.length * 2);
+            const view = new DataView(pcm.buffer);
+            for (let i = 0; i < samples.length; i++) {
+                const clamped = Math.max(-1, Math.min(1, samples[i]));
+                const value = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+                view.setInt16(i * 2, Math.round(value), true);
+            }
+            if (pcm.byteLength > MAX_AUDIO_BYTES) {
+                throw new Error('Decoded PCM cannot exceed 256KB');
+            }
+            return pcm;
+        }
+
+        async function uploadAudioFile() {
+            if (!isConnected || !service) {
+                showNotification('Error', 'VibeKeys is not connected', true);
+                return;
+            }
+
+            const file = audioFileInput.files[0];
+            try {
+                const data = await decodeAudioToPcm(file);
+                uploadAudioButton.disabled = true;
+                uploadAudioButton.textContent = 'Uploading... 0%';
+
+                const characteristic = await service.getCharacteristic(AUDIO_ID);
+                const lengthPacket = new Uint8Array(4);
+                new DataView(lengthPacket.buffer).setUint32(0, data.byteLength, true);
+                await characteristic.writeValue(lengthPacket);
+
+                const chunkSize = 512;
+                const totalChunks = Math.ceil(data.byteLength / chunkSize);
+                for (let i = 0; i < totalChunks; i++) {
+                    const start = i * chunkSize;
+                    const end = Math.min(start + chunkSize, data.byteLength);
+                    await characteristic.writeValue(data.slice(start, end));
+                    const progress = Math.round(((i + 1) / totalChunks) * 100);
+                    uploadAudioButton.textContent = `Uploading... ${progress}%`;
+                    await new Promise(resolve => setTimeout(resolve, 20));
+                }
+
+                audioFileStatus.textContent = `${file.name} uploaded (${Math.round(data.byteLength / 1024)}KB PCM)`;
+                showNotification('Success', 'Audio uploaded');
+            } catch (error) {
+                console.error('Audio upload failed:', error);
+                showNotification('Error', 'Audio upload failed: ' + error.message, true);
+            } finally {
+                uploadAudioButton.disabled = !isConnected || !audioFileInput.files[0];
+                uploadAudioButton.textContent = 'Upload Audio';
+            }
+        }
+
+        connectButton.addEventListener('click', async () => {
+            if (!isConnected) {
+                await connectToDevice();
+            } else {
+                await disconnectFromDevice();
+            }
+        });
+
+        loadAllButton.addEventListener('click', () => {
+            loadAllConfiguration();
+        });
+
+        saveAllButton.addEventListener('click', () => {
+            saveAllModifications();
+        });
+
+        addWifiButton.addEventListener('click', () => {
+            wifiList.push({ ssid: '', pass: '' });
+            renderWifiRows();
+            markWifiModified();
+        });
+
+        // Listen for input changes
+        serverUrlInput.addEventListener('input', () => {
+            markFieldAsModified('url', urlTitle);
+        });
+
+        // ASR fields: any edit marks the whole ASR card modified
+        asrUriInput.addEventListener('input', () => markFieldAsModified('asr', asrTitle));
+        asrApiKeyInput.addEventListener('input', () => markFieldAsModified('asr', asrTitle));
+        asrModelInput.addEventListener('input', () => markFieldAsModified('asr', asrTitle));
+
+        audioFileInput.addEventListener('change', async () => {
+            const file = audioFileInput.files[0];
+            uploadAudioButton.disabled = true;
+            if (!file) {
+                audioFileStatus.textContent = 'No file selected';
+                return;
+            }
+            try {
+                validateAudioFile(file);
+                audioFileStatus.textContent = `${file.name} (${Math.round(file.size / 1024)}KB WAV)`;
+                uploadAudioButton.disabled = !isConnected;
+            } catch (error) {
+                audioFileInput.value = '';
+                audioFileStatus.textContent = error.message;
+                showNotification('Error', error.message, true);
+            }
+        });
+
+        uploadAudioButton.addEventListener('click', () => {
+            uploadAudioFile();
+        });
+
+        if (!navigator.bluetooth) {
+            showNotification('Error', 'Your browser does not support the Web Bluetooth API. Please use Chrome or Edge', true);
+            connectButton.disabled = true;
+        }
+
+        // Read WiFi credentials from URL query parameters (?ssid=...&pass=...)
+        const urlParams = new URLSearchParams(window.location.search);
+        const ssidParam = urlParams.get('ssid');
+        const passParam = urlParams.get('pass');
+        if (ssidParam || passParam) {
+            wifiList = [{ ssid: ssidParam || '', pass: passParam || '' }];
+            markWifiModified();
+            skipAutoLoad = true;
+        }
+
+        // Initial render: at least one empty row so the UI is usable before connect.
+        if (wifiList.length === 0) {
+            wifiList.push({ ssid: '', pass: '' });
+        }
+        renderWifiRows();
+
+        // Initialize controls as disabled
+        disableControls();
     </script>
 </body>
 

@@ -49,6 +49,7 @@ pub async fn run(
     mut boot_button: BootButton,
     asr_tx: std::sync::mpsc::Sender<audio::AsrRequest>,
     asr_config: Option<&audio::AsrConfig>,
+    audio_prompt: Option<&audio::Prompt>,
 ) -> anyhow::Result<()> {
     log::info!("Connecting to MQTT broker {uri} as {client_id}");
     let mut server = match MqttServer::new(&uri, &client_id).await {
@@ -71,6 +72,7 @@ pub async fn run(
         &mut touch_rx,
         &mut boot_button,
         &mut backlight,
+        audio_prompt,
     )
     .await?;
 
@@ -115,6 +117,7 @@ pub async fn run(
                                     &mut touch_rx,
                                     &mut boot_button,
                                     &mut backlight,
+                                    audio_prompt,
                                 )
                                 .await?;
                             } else if let Some(msg) = scroll_swipe_message(start, touch) {
@@ -868,6 +871,7 @@ async fn open_session_picker(
     touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
     boot_button: &mut BootButton,
     backlight: &mut BacklightMode,
+    audio_prompt: Option<&audio::Prompt>,
 ) -> anyhow::Result<()> {
     // 入口:retained presence 在 subscribe 后很快到达,但需 poll recv 才进 sessions 表。
     // 最多等 1500ms 让它们落地。
@@ -1064,6 +1068,9 @@ async fn open_session_picker(
                             last_list_change = tokio::time::Instant::now();
                             next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
                             backlight.set(BacklightMode::Normal)?;
+                            if let Some(prompt) = audio_prompt {
+                                prompt.play_async();
+                            }
                             off_since = None;
                             scroll_offset = clamp_session_scroll_offset(server, scroll_offset, item_rects.len().max(1));
                             last_session_title = render_session_picker(

@@ -19,6 +19,7 @@ static esp_lcd_touch_handle_t touch_handle = NULL;
 static esp_codec_dev_handle_t speaker_handle = NULL;
 static esp_codec_dev_handle_t microphone_handle = NULL;
 static i2c_master_dev_handle_t pmu_handle = NULL;
+static bool speaker_opened = false;
 static bool microphone_opened = false;
 
 #define BOARD_AUDIO_SAMPLE_RATE (16000)
@@ -340,6 +341,41 @@ int board_audio_read_mic(void *data, int len)
     }
 
     err = esp_codec_dev_read(microphone_handle, data, len);
+    if (err != ESP_CODEC_DEV_OK) {
+        return err;
+    }
+
+    return len;
+}
+
+int board_audio_write_speaker(const void *data, int len)
+{
+    if (data == NULL || len <= 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    int err = board_audio_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (!speaker_opened) {
+        esp_codec_dev_sample_info_t fs = {
+            .bits_per_sample = BOARD_AUDIO_BITS_PER_SAMPLE,
+            .channel = BOARD_AUDIO_CHANNELS,
+            .channel_mask = 0,
+            .sample_rate = BOARD_AUDIO_SAMPLE_RATE,
+            .mclk_multiple = 0,
+        };
+        err = esp_codec_dev_open(speaker_handle, &fs);
+        if (err != ESP_CODEC_DEV_OK) {
+            ESP_LOGE(TAG, "esp_codec_dev_open speaker failed: %d", err);
+            return err;
+        }
+        speaker_opened = true;
+    }
+
+    err = esp_codec_dev_write(speaker_handle, (void *)data, len);
     if (err != ESP_CODEC_DEV_OK) {
         return err;
     }

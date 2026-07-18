@@ -4,6 +4,7 @@
 //! - CONFIG 特征值(READ|WRITE):写 = JSON 部分更新
 //!   `{"wifi_list":[{ssid,pass}...], "server_url":..., "asr_config":...}`,
 //!   顺序即连接优先级;读 = 当前整份快照。
+//! - AUDIO 特征值(WRITE):第一包 little-endian u32 PCM byte length,后续包 PCM bytes;最大 256KB。
 //! - RESET 特征值(WRITE):写入 `b"RESET"` 触发重启应用配置。
 //!
 //! NVS("setting" namespace):`wifi_list` 存整份 JSON,`server_url` 存字符串。
@@ -22,7 +23,9 @@ use crate::setting::{Setting, WifiCred, MAX_WIFI_CREDS};
 
 pub const SERVICE_ID: BleUuid = uuid128!("623fa3e2-631b-4f8f-a6e7-a7b09c03e7e0");
 const CONFIG_ID: BleUuid = uuid128!("cef520a9-bcb5-4fc6-87f7-82804eee2b20");
+const AUDIO_ID: BleUuid = uuid128!("a8ef1f04-b6e8-4d7b-bd40-6f2ebcbb2f49");
 const RESET_ID: BleUuid = uuid128!("f0e1d2c3-b4a5-6789-0abc-def123456789");
+const MAX_AUDIO_BYTES: usize = 256 * 1024;
 
 /// CONFIG 写载荷:部分配置,缺失字段保持原状。
 #[derive(Debug, Deserialize)]
@@ -30,6 +33,11 @@ struct ConfigPatch {
     wifi_list: Option<Vec<WifiCred>>,
     server_url: Option<String>,
     asr_config: Option<serde_json::Value>,
+}
+
+struct AudioUpload {
+    expected_size: usize,
+    data: Vec<u8>,
 }
 
 /// CONFIG 读快照:整份 wifi_list + server_url + asr_config。
@@ -53,6 +61,8 @@ pub fn new_setting_service(
 ) -> anyhow::Result<()> {
     let setting_r = setting.clone();
     let setting_w = setting.clone();
+    let setting_audio = setting.clone();
+    let audio_upload = Arc::new(Mutex::new(None::<AudioUpload>));
 
     let ch =
         service.create_characteristic(CONFIG_ID, NimbleProperties::READ | NimbleProperties::WRITE);
@@ -113,6 +123,15 @@ pub fn new_setting_service(
             }
         });
 
+    let audio_state = audio_upload.clone();
+    let audio = service.create_characteristic(AUDIO_ID, NimbleProperties::WRITE);
+    audio.lock().on_write(move |args| {
+        if let Err(e) = handle_audio_upload_write(&setting_audio, &audio_state, args.recv_data()) {
+            log::error!("BLE audio upload failed: {e:?}");
+            *audio_state.lock().unwrap() = None;
+        }
+    });
+
     let reset = service.create_characteristic(RESET_ID, NimbleProperties::WRITE);
     reset.lock().on_write(move |args| {
         if args.recv_data() == b"RESET" {
@@ -122,6 +141,84 @@ pub fn new_setting_service(
         }
     });
 
+    Ok(())
+}
+
+fn handle_audio_upload_write(
+    setting: &Arc<Mutex<(Setting, EspDefaultNvs)>>,
+    state: &Arc<Mutex<Option<AudioUpload>>>,
+    payload: &[u8],
+) -> anyhow::Result<()> {
+    let mut upload_slot = state.lock().unwrap();
+    if upload_slot.is_none() {
+        let expected_size = pcm_expected_size(payload)?;
+        if expected_size > MAX_AUDIO_BYTES {
+            anyhow::bail!(
+                "audio upload too large: {}B > {}B",
+                expected_size,
+                MAX_AUDIO_BYTES
+            );
+        }
+        log::info!("BLE PCM upload start: expected={}B", expected_size);
+        *upload_slot = Some(AudioUpload {
+            expected_size,
+            data: Vec::with_capacity(expected_size),
+        });
+        return Ok(());
+    }
+
+    let upload = upload_slot.as_mut().unwrap();
+    let next_len = upload.data.len() + payload.len();
+    if next_len > upload.expected_size || next_len > MAX_AUDIO_BYTES {
+        anyhow::bail!(
+            "audio upload overflow: received {}B, expected {}B",
+            next_len,
+            upload.expected_size
+        );
+    }
+    upload.data.extend_from_slice(payload);
+    log::debug!(
+        "BLE audio upload chunk: {}B/{}B",
+        upload.data.len(),
+        upload.expected_size
+    );
+
+    if upload.data.len() == upload.expected_size {
+        validate_pcm(&upload.data)?;
+        let locked = setting.lock().unwrap();
+        locked
+            .1
+            .set_blob(crate::audio::PROMPT_PCM_KEY, &upload.data)?;
+        log::info!(
+            "BLE PCM upload complete: {}B saved to NVS key {:?}",
+            upload.data.len(),
+            crate::audio::PROMPT_PCM_KEY
+        );
+        *upload_slot = None;
+    }
+
+    Ok(())
+}
+
+fn validate_pcm(data: &[u8]) -> anyhow::Result<()> {
+    anyhow::ensure!(!data.is_empty(), "PCM data is empty");
+    anyhow::ensure!(data.len() % 2 == 0, "PCM data must be i16 aligned");
+    Ok(())
+}
+
+fn pcm_expected_size(data: &[u8]) -> anyhow::Result<usize> {
+    if data.len() != 4 {
+        anyhow::bail!("PCM upload must start with 4-byte length packet");
+    }
+    let len = u32::from_le_bytes(data.try_into().unwrap()) as usize;
+    validate_pcm_len(len)?;
+    Ok(len)
+}
+
+fn validate_pcm_len(len: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(len > 0, "PCM data is empty");
+    anyhow::ensure!(len <= MAX_AUDIO_BYTES, "PCM data exceeds 256KB");
+    anyhow::ensure!(len % 2 == 0, "PCM length must be i16 aligned");
     Ok(())
 }
 
