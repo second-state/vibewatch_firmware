@@ -332,22 +332,22 @@ const TERMINAL_SCROLLBACK_ROWS: usize = 64;
 pub struct ListItem {
     pub rect: Rectangle,
     pub text: String,
-    pub bg_color: Option<UiColor>,
     pub fg_color: Option<UiColor>,
+    pub border_color: Option<UiColor>,
 }
 
 impl ListItem {
     pub fn new(
         rect: Rectangle,
         text: impl Into<String>,
-        bg_color: Option<UiColor>,
+        border_color: Option<UiColor>,
         fg_color: Option<UiColor>,
     ) -> Self {
         Self {
             rect,
             text: text.into(),
-            bg_color,
             fg_color,
+            border_color,
         }
     }
 }
@@ -1031,12 +1031,10 @@ impl UI {
                     item.rect.size.height.saturating_sub(6),
                 ),
             );
-            let mut style = PrimitiveStyleBuilder::new()
-                .stroke_color(ColorFormat::CSS_BLACK)
-                .stroke_width(8);
-            if let Some(bg_color) = item.bg_color {
-                style = style.fill_color(bg_color);
-            }
+            let style = PrimitiveStyleBuilder::new()
+                .stroke_color(item.border_color.unwrap_or(ColorFormat::CSS_BLACK))
+                .stroke_width(8)
+                .fill_color(ColorFormat::CSS_BLACK);
             draw_rect.into_styled(style.build()).draw(display)?;
             if let Some(fg_color) = item.fg_color {
                 let text_y =
