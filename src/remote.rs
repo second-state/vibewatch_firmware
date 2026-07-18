@@ -242,7 +242,6 @@ enum BootMenuAction {
     Restart,
     PowerOff,
     ScreenOff,
-    RestoreScreen,
     ToggleSound,
     Back,
 }
@@ -262,18 +261,16 @@ async fn show_boot_menu(
         boot_menu_item(0, "Reboot", crate::ui::UiColor::CSS_DARK_ORANGE),
         boot_menu_item(1, "Power Off", crate::ui::UiColor::CSS_RED),
         boot_menu_item(2, "Screen Off", crate::ui::UiColor::CSS_GRAY),
-        boot_menu_item(3, "Restore", crate::ui::UiColor::CSS_DARK_BLUE),
-        boot_menu_item(4, sound_label, crate::ui::UiColor::CSS_GREEN),
-        boot_menu_item(5, "Back", crate::ui::UiColor::CSS_BLACK),
+        boot_menu_item(3, sound_label, crate::ui::UiColor::CSS_GREEN),
+        boot_menu_item(4, "Back", crate::ui::UiColor::CSS_BLACK),
     ];
     let index = select_remote_list_item(server, gui, touch_rx, "System", &items).await?;
     Ok(match index {
         0 => BootMenuAction::Restart,
         1 => BootMenuAction::PowerOff,
         2 => BootMenuAction::ScreenOff,
-        3 => BootMenuAction::RestoreScreen,
-        4 => BootMenuAction::ToggleSound,
-        5 => BootMenuAction::Back,
+        3 => BootMenuAction::ToggleSound,
+        4 => BootMenuAction::Back,
         _ => unreachable!(),
     })
 }
@@ -974,19 +971,6 @@ async fn open_session_picker(
                     BootMenuAction::ScreenOff => {
                         backlight.set(BacklightMode::Off)?;
                         off_since = Some(tokio::time::Instant::now());
-                        last_session_title = render_session_picker(
-                            server,
-                            gui,
-                            &mut labels,
-                            &mut item_rects,
-                            scroll_offset,
-                        );
-                    }
-                    BootMenuAction::RestoreScreen => {
-                        backlight.set(BacklightMode::Normal)?;
-                        off_since = None;
-                        last_list_change = tokio::time::Instant::now();
-                        next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
                         last_session_title = render_session_picker(
                             server,
                             gui,
