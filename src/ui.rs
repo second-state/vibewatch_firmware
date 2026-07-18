@@ -1029,6 +1029,49 @@ impl UI {
         Err(anyhow::anyhow!("flush list failed"))
     }
 
+    pub fn refresh_list_title(&mut self, title: &str) -> anyhow::Result<()> {
+        let title_rect = Rectangle::new(
+            Point::zero(),
+            Size::new(DISPLAY_WIDTH as u32, MENU_START_Y as u32),
+        );
+        title_rect
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .fill_color(ColorFormat::CSS_BLACK)
+                    .build(),
+            )
+            .draw(self.display.as_mut())?;
+
+        Text::with_alignment(
+            title,
+            Point::new((DISPLAY_WIDTH / 2) as i32, 18),
+            U8g2TextStyle::new(
+                u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
+                ColorFormat::CSS_WHITE,
+            ),
+            Alignment::Center,
+        )
+        .draw(self.display.as_mut())?;
+
+        let Some((data, rect)) = self.display.rect_data(title_rect) else {
+            return Ok(());
+        };
+        for i in 0..5 {
+            let e = crate::lcd::flush_display(
+                &data,
+                rect.top_left.x,
+                rect.top_left.y,
+                rect.top_left.x + rect.size.width as i32,
+                rect.top_left.y + rect.size.height as i32,
+            );
+            if e == 0 {
+                return Ok(());
+            }
+            log::warn!("flush list title error: {e} retry {i}");
+        }
+        Err(anyhow::anyhow!("flush list title failed"))
+    }
+
     /// Compatibility helper for the existing menu/session list layout.
     pub fn display_menu_list(
         &mut self,

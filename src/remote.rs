@@ -15,15 +15,12 @@ use crate::{
 };
 
 const BACKLIGHT_NORMAL: u8 = 50;
-const BACKLIGHT_DIM: u8 = 10;
-const SESSION_LIST_IDLE_DIM_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
-const SESSION_LIST_IDLE_OFF_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+const SESSION_LIST_IDLE_OFF_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 const SESSION_LIST_TITLE_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BacklightMode {
     Normal,
-    Dim,
     Off,
 }
 
@@ -34,7 +31,6 @@ impl BacklightMode {
         }
         let level = match mode {
             Self::Normal => BACKLIGHT_NORMAL,
-            Self::Dim => BACKLIGHT_DIM,
             Self::Off => 0,
         };
         crate::lcd::set_backlight(level)?;
@@ -234,7 +230,7 @@ enum ScreenAction {
 enum BootMenuAction {
     Restart,
     PowerOff,
-    DimScreen,
+    ScreenOff,
     RestoreScreen,
     Back,
 }
@@ -247,7 +243,7 @@ async fn show_boot_menu(
     let items = vec![
         boot_menu_item(0, "Reboot", crate::ui::UiColor::CSS_DARK_ORANGE),
         boot_menu_item(1, "Power Off", crate::ui::UiColor::CSS_RED),
-        boot_menu_item(2, "Dim Screen", crate::ui::UiColor::CSS_GRAY),
+        boot_menu_item(2, "Screen Off", crate::ui::UiColor::CSS_GRAY),
         boot_menu_item(3, "Restore", crate::ui::UiColor::CSS_DARK_BLUE),
         boot_menu_item(4, "Back", crate::ui::UiColor::CSS_BLACK),
     ];
@@ -255,7 +251,7 @@ async fn show_boot_menu(
     Ok(match index {
         0 => BootMenuAction::Restart,
         1 => BootMenuAction::PowerOff,
-        2 => BootMenuAction::DimScreen,
+        2 => BootMenuAction::ScreenOff,
         3 => BootMenuAction::RestoreScreen,
         4 => BootMenuAction::Back,
         _ => unreachable!(),
@@ -816,7 +812,8 @@ async fn open_session_picker(
     let mut labels = Vec::new();
     let mut item_rects = Vec::new();
     let mut scroll_offset = 0usize;
-    render_session_picker(server, gui, &mut labels, &mut item_rects, scroll_offset);
+    let mut last_session_title =
+        render_session_picker(server, gui, &mut labels, &mut item_rects, scroll_offset);
 
     let mut press_touch = None;
     let mut last_list_change = tokio::time::Instant::now();
@@ -825,20 +822,14 @@ async fn open_session_picker(
         tokio::select! {
             _ = tokio::time::sleep_until(next_title_refresh), if *backlight != BacklightMode::Off => {
                 next_title_refresh = tokio::time::Instant::now() + SESSION_LIST_TITLE_REFRESH_DELAY;
-                render_session_picker(
-                    server,
-                    gui,
-                    &mut labels,
-                    &mut item_rects,
-                    scroll_offset,
-                );
-            }
-            _ = tokio::time::sleep_until(last_list_change + SESSION_LIST_IDLE_DIM_DELAY), if *backlight == BacklightMode::Normal => {
-                log::info!("Session list unchanged for 30s, dimming screen");
-                backlight.set(BacklightMode::Dim)?;
+                let title = session_picker_title();
+                if title != last_session_title {
+                    gui.refresh_list_title(&title)?;
+                    last_session_title = title;
+                }
             }
             _ = tokio::time::sleep_until(last_list_change + SESSION_LIST_IDLE_OFF_DELAY), if *backlight != BacklightMode::Off => {
-                log::info!("Session list unchanged for 60s, turning screen off");
+                log::info!("Session list unchanged for 30s, turning screen off");
                 backlight.set(BacklightMode::Off)?;
             }
             _ = crate::boot::wait_boot_press(boot_button) => {
@@ -855,9 +846,9 @@ async fn open_session_picker(
                             std::thread::sleep(std::time::Duration::from_secs(60));
                         }
                     }
-                    BootMenuAction::DimScreen => {
-                        backlight.set(BacklightMode::Dim)?;
-                        render_session_picker(
+                    BootMenuAction::ScreenOff => {
+                        backlight.set(BacklightMode::Off)?;
+                        last_session_title = render_session_picker(
                             server,
                             gui,
                             &mut labels,
@@ -869,7 +860,7 @@ async fn open_session_picker(
                         backlight.set(BacklightMode::Normal)?;
                         last_list_change = tokio::time::Instant::now();
                         next_title_refresh = last_list_change + SESSION_LIST_TITLE_REFRESH_DELAY;
-                        render_session_picker(
+                        last_session_title = render_session_picker(
                             server,
                             gui,
                             &mut labels,
@@ -878,7 +869,7 @@ async fn open_session_picker(
                         );
                     }
                     BootMenuAction::Back => {
-                        render_session_picker(
+                        last_session_title = render_session_picker(
                             server,
                             gui,
                             &mut labels,
@@ -897,7 +888,7 @@ async fn open_session_picker(
                     last_list_change = tokio::time::Instant::now();
                     next_title_refresh = last_list_change + SESSION_LIST_TITLE_REFRESH_DELAY;
                     press_touch = None;
-                    render_session_picker(
+                    last_session_title = render_session_picker(
                         server,
                         gui,
                         &mut labels,
@@ -927,7 +918,7 @@ async fn open_session_picker(
                             if next_offset != scroll_offset {
                                 scroll_offset = next_offset;
                                 log::info!("Session list scroll offset={}", scroll_offset);
-                                render_session_picker(
+                                last_session_title = render_session_picker(
                                     server,
                                     gui,
                                     &mut labels,
@@ -967,7 +958,7 @@ async fn open_session_picker(
                             next_title_refresh = last_list_change + SESSION_LIST_TITLE_REFRESH_DELAY;
                             backlight.set(BacklightMode::Normal)?;
                             scroll_offset = clamp_session_scroll_offset(server, scroll_offset, item_rects.len().max(1));
-                            render_session_picker(
+                            last_session_title = render_session_picker(
                                 server,
                                 gui,
                                 &mut labels,
@@ -992,22 +983,28 @@ fn render_session_picker(
     labels: &mut Vec<SessionLabel>,
     item_rects: &mut Vec<embedded_graphics::primitives::Rectangle>,
     scroll_offset: usize,
-) {
+) -> String {
     *labels = server.session_labels();
     if labels.is_empty() {
         let _ = gui.show_status("no session", "");
         item_rects.clear();
+        String::new()
     } else {
         let items: Vec<(String, bool)> = labels
             .iter()
             .skip(scroll_offset)
             .map(|(_, label, _, is_working)| (label.clone(), *is_working))
             .collect();
-        let title = match crate::power::battery_percent() {
-            Some(percent) => format!("Session: Battery {percent}%"),
-            None => "Session: Battery --".to_string(),
-        };
+        let title = session_picker_title();
         *item_rects = gui.display_menu_list(&title, &items).unwrap_or_default();
+        title
+    }
+}
+
+fn session_picker_title() -> String {
+    match crate::power::battery_percent() {
+        Some(percent) => format!("Session: Battery {percent}%"),
+        None => "Session: Battery --".to_string(),
     }
 }
 
