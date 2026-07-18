@@ -320,6 +320,7 @@ const MENU_ITEM_H: u16 = 66;
 const MENU_START_Y: u16 = 30;
 const MENU_FONT_H: u16 = 17;
 const MENU_FOOTER_H: i32 = 24;
+pub const MENU_TITLE_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn build_version_label() -> &'static str {
     option_env!("VIBEKEYS_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
@@ -392,16 +393,60 @@ pub async fn main_menu(
         ("Remote".to_string(), false),
         ("Setting".to_string(), false),
     ];
-    let title = match crate::power::battery_percent() {
-        Some(percent) => format!("Main: Battery {percent}%"),
-        None => "Main: Battery --".to_string(),
+    let mut title = main_menu_title();
+    let item_rects = gui.display_menu_list(&title, &items)?;
+    log::info!("{title}: waiting for touch selection");
+
+    let mut press_index = None;
+    let mut next_title_refresh = tokio::time::Instant::now() + MENU_TITLE_REFRESH_DELAY;
+    let index = loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(next_title_refresh) => {
+                next_title_refresh = tokio::time::Instant::now() + MENU_TITLE_REFRESH_DELAY;
+                let next_title = main_menu_title();
+                if next_title != title {
+                    gui.refresh_list_title(&next_title)?;
+                    title = next_title;
+                }
+            }
+            event = touch_rx.recv() => {
+                match event {
+                    Some(crate::lcd::TouchEvent::Press(touch)) => {
+                        if press_index.is_none() {
+                            press_index = list_touch_index(touch, &item_rects);
+                        }
+                    }
+                    Some(crate::lcd::TouchEvent::Release(touch)) => {
+                        let release_index = list_touch_index(touch, &item_rects);
+                        if press_index.is_some() && press_index == release_index {
+                            let index = press_index.unwrap();
+                            log::info!("{title}: selected item {index}");
+                            break index;
+                        }
+                        log::info!(
+                            "{title}: ignored touch, press={:?} release={:?}",
+                            press_index,
+                            release_index
+                        );
+                        press_index = None;
+                    }
+                    None => return Err(anyhow::anyhow!("touch event source closed")),
+                }
+            }
+        }
     };
-    let index = select_menu_item(gui, touch_rx, &title, &items).await?;
     Ok(match index {
         0 => MainMenuSelection::Remote,
         1 => MainMenuSelection::Setting,
         _ => unreachable!(),
     })
+}
+
+fn main_menu_title() -> String {
+    match crate::power::battery_percent() {
+        Some(percent) => format!("Main: Battery {percent}%"),
+        None => "Main: Battery --".to_string(),
+    }
 }
 
 pub async fn setting_menu(

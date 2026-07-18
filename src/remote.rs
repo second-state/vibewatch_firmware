@@ -16,7 +16,6 @@ use crate::{
 
 const BACKLIGHT_NORMAL: u8 = 50;
 const SESSION_LIST_IDLE_OFF_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
-const SESSION_LIST_TITLE_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BacklightMode {
@@ -817,11 +816,11 @@ async fn open_session_picker(
 
     let mut press_touch = None;
     let mut last_list_change = tokio::time::Instant::now();
-    let mut next_title_refresh = last_list_change + SESSION_LIST_TITLE_REFRESH_DELAY;
+    let mut next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
     loop {
         tokio::select! {
             _ = tokio::time::sleep_until(next_title_refresh), if *backlight != BacklightMode::Off => {
-                next_title_refresh = tokio::time::Instant::now() + SESSION_LIST_TITLE_REFRESH_DELAY;
+                next_title_refresh = tokio::time::Instant::now() + crate::ui::MENU_TITLE_REFRESH_DELAY;
                 let title = session_picker_title();
                 if title != last_session_title {
                     gui.refresh_list_title(&title)?;
@@ -859,7 +858,7 @@ async fn open_session_picker(
                     BootMenuAction::RestoreScreen => {
                         backlight.set(BacklightMode::Normal)?;
                         last_list_change = tokio::time::Instant::now();
-                        next_title_refresh = last_list_change + SESSION_LIST_TITLE_REFRESH_DELAY;
+                        next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
                         last_session_title = render_session_picker(
                             server,
                             gui,
@@ -886,7 +885,7 @@ async fn open_session_picker(
                     log::info!("Touch while screen is off, restoring backlight");
                     backlight.set(BacklightMode::Normal)?;
                     last_list_change = tokio::time::Instant::now();
-                    next_title_refresh = last_list_change + SESSION_LIST_TITLE_REFRESH_DELAY;
+                    next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
                     press_touch = None;
                     last_session_title = render_session_picker(
                         server,
@@ -955,7 +954,7 @@ async fn open_session_picker(
                     Some(MqttEvent::Presence { list_changed, .. }) => {
                         if list_changed {
                             last_list_change = tokio::time::Instant::now();
-                            next_title_refresh = last_list_change + SESSION_LIST_TITLE_REFRESH_DELAY;
+                            next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
                             backlight.set(BacklightMode::Normal)?;
                             scroll_offset = clamp_session_scroll_offset(server, scroll_offset, item_rects.len().max(1));
                             last_session_title = render_session_picker(
