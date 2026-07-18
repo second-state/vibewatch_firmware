@@ -16,6 +16,9 @@ use crate::{
 
 const BACKLIGHT_NORMAL: u8 = 50;
 const SESSION_LIST_IDLE_OFF_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+const SESSION_LIST_OFF_SHUTDOWN_PROMPT_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+const IDLE_SHUTDOWN_COUNTDOWN_SECS: u64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BacklightMode {
@@ -267,7 +270,7 @@ fn boot_menu_item(index: usize, text: &str, bg: crate::ui::UiColor) -> crate::ui
         ),
         text,
         Some(bg),
-        Some(crate::ui::UiColor::CSS_WHITE),
+        Some(crate::ui::TEXT_LIGHT),
     )
 }
 
@@ -784,6 +787,80 @@ async fn wait_touch_release(touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::Touc
     }
 }
 
+async fn show_idle_shutdown_prompt(
+    server: &mut MqttServer,
+    gui: &mut UI,
+    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+) -> anyhow::Result<bool> {
+    let cancel_rect = Rectangle::new(
+        Point::new(40, lcd::LCD_HEIGHT as i32 - 132),
+        Size::new((lcd::LCD_WIDTH - 80) as u32, 82),
+    );
+    let items = vec![crate::ui::ListItem::new(
+        cancel_rect,
+        "Cancel",
+        Some(crate::ui::UiColor::CSS_DARK_ORANGE),
+        Some(crate::ui::TEXT_LIGHT),
+    )];
+
+    let mut remaining = IDLE_SHUTDOWN_COUNTDOWN_SECS;
+    let mut title = idle_shutdown_title(remaining);
+    let item_rects = gui.display_list(&title, &items)?;
+    let mut press_index = None;
+    let mut next_tick = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(next_tick) => {
+                if remaining == 0 {
+                    return Ok(false);
+                }
+                remaining -= 1;
+                if remaining == 0 {
+                    return Ok(false);
+                }
+                next_tick += std::time::Duration::from_secs(1);
+                title = idle_shutdown_title(remaining);
+                gui.refresh_list_title(&title)?;
+            }
+            event = touch_rx.recv() => {
+                match event {
+                    Some(lcd::TouchEvent::Press(touch)) => {
+                        if press_index.is_none() {
+                            press_index = crate::ui::list_touch_index(touch, &item_rects);
+                        }
+                    }
+                    Some(lcd::TouchEvent::Release(touch)) => {
+                        let release_index = crate::ui::list_touch_index(touch, &item_rects);
+                        if press_index.is_some() && press_index == release_index {
+                            log::info!("Idle shutdown cancelled");
+                            return Ok(true);
+                        }
+                        press_index = None;
+                    }
+                    None => return Ok(true),
+                }
+            }
+            ev = server.recv() => {
+                match ev {
+                    Some(MqttEvent::Presence { list_changed, .. }) => {
+                        if list_changed && !sessions_are_all_idle(&server.session_labels()) {
+                            log::info!("Idle shutdown cancelled by working session");
+                            return Ok(true);
+                        }
+                    }
+                    Some(MqttEvent::ActiveScreen(_)) | Some(MqttEvent::ActiveText(_)) => {}
+                    None => return Ok(true),
+                }
+            }
+        }
+    }
+}
+
+fn idle_shutdown_title(remaining: u64) -> String {
+    format!("Save battery: off in {remaining}s")
+}
+
 /// 会话选择器:显示 vibetty 会话列表,触摸行选定。
 async fn open_session_picker(
     server: &mut MqttServer,
@@ -817,7 +894,11 @@ async fn open_session_picker(
     let mut press_touch = None;
     let mut last_list_change = tokio::time::Instant::now();
     let mut next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
+    let mut off_since = None;
     loop {
+        let shutdown_prompt_at = off_since
+            .map(|instant| instant + SESSION_LIST_OFF_SHUTDOWN_PROMPT_DELAY)
+            .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(3600));
         tokio::select! {
             _ = tokio::time::sleep_until(next_title_refresh), if *backlight != BacklightMode::Off => {
                 next_title_refresh = tokio::time::Instant::now() + crate::ui::MENU_TITLE_REFRESH_DELAY;
@@ -830,6 +911,30 @@ async fn open_session_picker(
             _ = tokio::time::sleep_until(last_list_change + SESSION_LIST_IDLE_OFF_DELAY), if *backlight != BacklightMode::Off => {
                 log::info!("Session list unchanged for 30s, turning screen off");
                 backlight.set(BacklightMode::Off)?;
+                off_since = Some(tokio::time::Instant::now());
+            }
+            _ = tokio::time::sleep_until(shutdown_prompt_at), if *backlight == BacklightMode::Off && off_since.is_some() && sessions_are_all_idle(&labels) => {
+                log::info!("Session list screen off for 10min with no working sessions; prompting shutdown");
+                backlight.set(BacklightMode::Normal)?;
+                off_since = None;
+                last_list_change = tokio::time::Instant::now();
+                next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
+                if show_idle_shutdown_prompt(server, gui, touch_rx).await? {
+                    press_touch = None;
+                    last_session_title = render_session_picker(
+                        server,
+                        gui,
+                        &mut labels,
+                        &mut item_rects,
+                        scroll_offset,
+                    );
+                } else {
+                    log::warn!("Idle shutdown countdown expired, shutting down");
+                    crate::power::shutdown();
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(60));
+                    }
+                }
             }
             _ = crate::boot::wait_boot_press(boot_button) => {
                 log::info!("BOOT menu requested from session list");
@@ -847,6 +952,7 @@ async fn open_session_picker(
                     }
                     BootMenuAction::ScreenOff => {
                         backlight.set(BacklightMode::Off)?;
+                        off_since = Some(tokio::time::Instant::now());
                         last_session_title = render_session_picker(
                             server,
                             gui,
@@ -857,6 +963,7 @@ async fn open_session_picker(
                     }
                     BootMenuAction::RestoreScreen => {
                         backlight.set(BacklightMode::Normal)?;
+                        off_since = None;
                         last_list_change = tokio::time::Instant::now();
                         next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
                         last_session_title = render_session_picker(
@@ -884,6 +991,7 @@ async fn open_session_picker(
                 {
                     log::info!("Touch while screen is off, restoring backlight");
                     backlight.set(BacklightMode::Normal)?;
+                    off_since = None;
                     last_list_change = tokio::time::Instant::now();
                     next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
                     press_touch = None;
@@ -956,6 +1064,7 @@ async fn open_session_picker(
                             last_list_change = tokio::time::Instant::now();
                             next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
                             backlight.set(BacklightMode::Normal)?;
+                            off_since = None;
                             scroll_offset = clamp_session_scroll_offset(server, scroll_offset, item_rects.len().max(1));
                             last_session_title = render_session_picker(
                                 server,
@@ -975,6 +1084,10 @@ async fn open_session_picker(
 }
 
 type SessionLabel = (String, String, bool, bool);
+
+fn sessions_are_all_idle(labels: &[SessionLabel]) -> bool {
+    labels.iter().all(|(_, _, _, is_working)| !*is_working)
+}
 
 fn render_session_picker(
     server: &MqttServer,

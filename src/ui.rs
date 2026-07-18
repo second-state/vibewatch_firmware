@@ -18,6 +18,7 @@ const GIF_IMG: &[u8] = include_bytes!("../assets/ht.gif");
 
 pub type UiColor = Rgb565;
 type ColorFormat = UiColor;
+pub const TEXT_LIGHT: UiColor = UiColor::CSS_LIGHT_GRAY;
 
 #[derive(Debug, Clone)]
 struct MyTextStyle {
@@ -299,7 +300,7 @@ fn new_terminal_renderer() -> embedded_graphics_terminal::TerminalRenderer {
     TerminalRenderer::new(
         Size::new(DISPLAY_WIDTH as u32, DISPLAY_HEIGHT as u32),
         u8g2_font_unifont_t_gb2312,
-        ColorFormat::WHITE,
+        TEXT_LIGHT,
         ColorFormat::BLACK,
     )
     .with_fallback_font(u8g2_font_unifont_t_symbols)
@@ -622,7 +623,7 @@ impl UI {
         outer
             .into_styled(
                 PrimitiveStyleBuilder::new()
-                    .stroke_color(ColorFormat::CSS_WHITE)
+                    .stroke_color(TEXT_LIGHT)
                     .stroke_width(1)
                     .build(),
             )
@@ -675,11 +676,7 @@ impl UI {
         TextBox::with_textbox_style(
             text,
             content_rect,
-            shifted_text_style(
-                u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
-                ColorFormat::CSS_WHITE,
-                3,
-            ),
+            shifted_text_style(u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312, TEXT_LIGHT, 3),
             content_style,
         )
         .draw(display)?;
@@ -998,10 +995,7 @@ impl UI {
         Text::with_alignment(
             title,
             Point::new((DISPLAY_WIDTH / 2) as i32, 18),
-            U8g2TextStyle::new(
-                u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
-                ColorFormat::CSS_WHITE,
-            ),
+            U8g2TextStyle::new(u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312, TEXT_LIGHT),
             Alignment::Center,
         )
         .draw(display)?;
@@ -1088,10 +1082,7 @@ impl UI {
         Text::with_alignment(
             title,
             Point::new((DISPLAY_WIDTH / 2) as i32, 18),
-            U8g2TextStyle::new(
-                u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
-                ColorFormat::CSS_WHITE,
-            ),
+            U8g2TextStyle::new(u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312, TEXT_LIGHT),
             Alignment::Center,
         )
         .draw(self.display.as_mut())?;
@@ -1143,7 +1134,7 @@ impl UI {
                     rect,
                     label.clone(),
                     Some(bg_color),
-                    Some(ColorFormat::CSS_WHITE),
+                    Some(TEXT_LIGHT),
                 ))
             })
             .collect();
