@@ -89,11 +89,6 @@ pub async fn run(
         tokio::select! {
             event = touch_rx.recv() => {
                 match event {
-                    Some(lcd::TouchEvent::Press(touch)) if is_asr_touch(touch) => {
-                        swipe_start = None;
-                        wait_touch_release(&mut touch_rx).await;
-                        run_touch_asr(&mut server, gui, &mut touch_rx, &asr_tx, asr_config).await?;
-                    }
                     Some(lcd::TouchEvent::Press(touch)) => {
                         if swipe_start.is_none() {
                             swipe_start = Some(touch);
@@ -104,7 +99,9 @@ pub async fn run(
                             let dx = touch.x as i32 - start.x as i32;
                             let dy = touch.y as i32 - start.y as i32;
                             log::info!("Swipe candidate: dx={} dy={}", dx, dy);
-                            if is_screen_menu_touch(start, touch) {
+                            if is_asr_touch(start) && is_asr_touch(touch) {
+                                run_touch_asr(&mut server, gui, &mut touch_rx, &asr_tx, asr_config).await?;
+                            } else if is_screen_menu_touch(start, touch) {
                                 show_screen_action_menu(&mut server, gui, &mut touch_rx).await?;
                             } else if is_back_swipe(start, touch) {
                                 log::info!("Right swipe detected, returning to session list");
