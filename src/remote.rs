@@ -273,13 +273,8 @@ async fn show_boot_menu(
 }
 
 fn boot_menu_item(index: usize, text: &str, bg: crate::ui::UiColor) -> crate::ui::ListItem {
-    const ITEM_H: i32 = 66;
-    const START_Y: i32 = 30;
     crate::ui::ListItem::new(
-        Rectangle::new(
-            Point::new(0, START_Y + index as i32 * ITEM_H),
-            Size::new(lcd::LCD_WIDTH as u32, ITEM_H as u32),
-        ),
+        crate::ui::menu_item_rect(index).expect("boot menu item must fit"),
         text,
         Some(bg),
         Some(crate::ui::TEXT_LIGHT),

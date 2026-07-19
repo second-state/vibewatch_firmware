@@ -319,6 +319,8 @@ pub fn terminal_text_cells() -> (u16, u16) {
 const ALPHA: f32 = 0.5;
 const MENU_ITEM_H: u16 = 66;
 const MENU_START_Y: u16 = 30;
+const MENU_COLUMNS: usize = 2;
+const MENU_COLUMN_GAP: i32 = 4;
 const MENU_FONT_H: u16 = 17;
 const MENU_FOOTER_H: i32 = 24;
 pub const MENU_TITLE_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
@@ -351,6 +353,42 @@ impl ListItem {
             border_color,
         }
     }
+}
+
+pub fn menu_item_rect(index: usize) -> Option<Rectangle> {
+    let col = index % MENU_COLUMNS;
+    let row = index / MENU_COLUMNS;
+    let total_gap = MENU_COLUMN_GAP * (MENU_COLUMNS as i32 - 1);
+    let item_width = (DISPLAY_WIDTH as i32 - total_gap) / MENU_COLUMNS as i32;
+    let item_left = col as i32 * (item_width + MENU_COLUMN_GAP);
+    let item_top = MENU_START_Y as i32 + row as i32 * MENU_ITEM_H as i32;
+    if item_top + MENU_ITEM_H as i32 > DISPLAY_HEIGHT as i32 - MENU_FOOTER_H {
+        return None;
+    }
+
+    Some(Rectangle::new(
+        Point::new(item_left, item_top),
+        Size::new(item_width as u32, MENU_ITEM_H as u32),
+    ))
+}
+
+fn list_display_text(text: &str, width: u32) -> String {
+    const HORIZONTAL_PADDING: u32 = 24;
+    let max_width = width.saturating_sub(HORIZONTAL_PADDING);
+    let mut used = 0;
+    let mut out = String::new();
+    for ch in text.chars() {
+        let ch_width = if ch.is_ascii() { 8 } else { 16 };
+        if used + ch_width > max_width {
+            if out.len() < text.len() {
+                out.push_str("...");
+            }
+            return out;
+        }
+        used += ch_width;
+        out.push(ch);
+    }
+    out
 }
 
 pub enum MainMenuSelection {
@@ -1033,8 +1071,9 @@ impl UI {
             if let Some(fg_color) = item.fg_color {
                 let text_y =
                     draw_rect.top_left.y + (draw_rect.size.height as i32 + MENU_FONT_H as i32) / 2;
+                let text = list_display_text(&item.text, draw_rect.size.width);
                 Text::with_alignment(
-                    &item.text,
+                    &text,
                     Point::new(draw_rect.center().x, text_y),
                     shifted_text_style(u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312, fg_color, 3),
                     Alignment::Center,
@@ -1116,15 +1155,7 @@ impl UI {
             .iter()
             .enumerate()
             .filter_map(|(i, (label, is_working))| {
-                let item_top = MENU_START_Y as i32 + (i as i32) * MENU_ITEM_H as i32;
-                if item_top + MENU_ITEM_H as i32 > DISPLAY_HEIGHT as i32 - MENU_FOOTER_H {
-                    return None;
-                }
-
-                let rect = Rectangle::new(
-                    Point::new(0, item_top),
-                    Size::new(DISPLAY_WIDTH as u32, MENU_ITEM_H as u32),
-                );
+                let rect = menu_item_rect(i)?;
                 let border_color = if *is_working {
                     ColorFormat::CSS_STEEL_BLUE
                 } else {
