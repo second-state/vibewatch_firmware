@@ -541,9 +541,9 @@ impl Default for UI {
         let state_pixels: Vec<Pixel<ColorFormat>> = state_area
             .into_styled(
                 PrimitiveStyleBuilder::new()
-                    .stroke_color(ColorFormat::CSS_DARK_BLUE)
+                    .stroke_color(ColorFormat::CSS_STEEL_BLUE)
                     .stroke_width(1)
-                    .fill_color(ColorFormat::CSS_DARK_BLUE)
+                    .fill_color(ColorFormat::CSS_STEEL_BLUE)
                     .build(),
             )
             .pixels()
@@ -1125,15 +1125,15 @@ impl UI {
                     Point::new(0, item_top),
                     Size::new(DISPLAY_WIDTH as u32, MENU_ITEM_H as u32),
                 );
-                let bg_color = if *is_working {
-                    ColorFormat::CSS_DARK_BLUE
+                let border_color = if *is_working {
+                    ColorFormat::CSS_STEEL_BLUE
                 } else {
                     ColorFormat::CSS_DARK_ORANGE
                 };
                 Some(ListItem::new(
                     rect,
                     label.clone(),
-                    Some(bg_color),
+                    Some(border_color),
                     Some(TEXT_LIGHT),
                 ))
             })
