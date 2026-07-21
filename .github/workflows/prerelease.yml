@@ -45,15 +45,15 @@ jobs:
       - name: Build firmware images
         run: ./build.sh all
         env:
-          VIBEKEYS_OTA_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.release_tag || github.ref_name }}/esp32-s3-hello_ota.bin
+          VIBEWATCH_OTA_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.release_tag || github.ref_name }}/vibewatch_ota.bin
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: esp32-s3-hello
+          name: vibewatch
           path: |
-            ./esp32-s3-hello_ota.bin
-            ./esp32-s3-hello_factory.bin
+            ./vibewatch_ota.bin
+            ./vibewatch_factory.bin
 
   release:
     needs: build

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Build script for esp32-s3-hello.
+# Build script for vibewatch.
 # Usage: ./build.sh {factory|ota|all}
 #
 # Partition layout in partitions.csv:
@@ -13,9 +13,9 @@ set -euo pipefail
 
 PT=partitions.csv
 TARGET=target/xtensa-esp32s3-espidf/release
-APP_BIN=esp32-s3-hello
-OTA_IMAGE=./esp32-s3-hello_ota.bin
-FACTORY_IMAGE=./esp32-s3-hello_factory.bin
+APP_BIN=vibewatch
+OTA_IMAGE=./vibewatch_ota.bin
+FACTORY_IMAGE=./vibewatch_factory.bin
 
 build_main() {
   echo "Building main firmware..."

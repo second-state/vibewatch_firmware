@@ -47,10 +47,10 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: esp32-s3-hello
+          name: vibewatch
           path: |
-            ./esp32-s3-hello_ota.bin
-            ./esp32-s3-hello_factory.bin
+            ./vibewatch_ota.bin
+            ./vibewatch_factory.bin
 
   release:
     needs: build
