@@ -357,6 +357,18 @@ impl ListItem {
 }
 
 pub fn menu_item_rect(index: usize) -> Option<Rectangle> {
+    menu_item_rect_for_count(index, MENU_COLUMNS)
+}
+
+fn menu_item_rect_for_count(index: usize, item_count: usize) -> Option<Rectangle> {
+    if item_count == 1 {
+        let item_top = MENU_START_Y as i32;
+        return Some(Rectangle::new(
+            Point::new(0, item_top),
+            Size::new(DISPLAY_WIDTH as u32, MENU_ITEM_H as u32),
+        ));
+    }
+
     let col = index % MENU_COLUMNS;
     let row = index / MENU_COLUMNS;
     let total_gap = MENU_COLUMN_GAP * (MENU_COLUMNS as i32 - 1);
@@ -1156,7 +1168,7 @@ impl UI {
             .iter()
             .enumerate()
             .filter_map(|(i, (label, is_working))| {
-                let rect = menu_item_rect(i)?;
+                let rect = menu_item_rect_for_count(i, items.len())?;
                 let border_color = if *is_working {
                     ColorFormat::CSS_STEEL_BLUE
                 } else {
