@@ -47,6 +47,19 @@ fn main() -> anyhow::Result<()> {
 
     // === Audio: Waveshare BSP I2S + ES8311 speaker + ES7210 microphone ===
     audio::init()?;
+    let audio_prompt_player =
+        audio_prompt.and_then(|prompt| match audio::PromptPlayer::start(prompt) {
+            Ok(player) => Some(player),
+            Err(e) => {
+                log::error!("Failed to start audio prompt worker: {e:?}");
+                None
+            }
+        });
+    if audio_prompt_enabled {
+        if let Some(player) = audio_prompt_player.as_ref() {
+            player.play_async();
+        }
+    }
     // ===
 
     ui::ui_background().ok();
@@ -155,7 +168,7 @@ fn main() -> anyhow::Result<()> {
         boot_button,
         asr_tx,
         asr_config.as_ref(),
-        audio_prompt.as_ref(),
+        audio_prompt_player.as_ref(),
         audio_prompt_enabled,
         &nvs,
     ));

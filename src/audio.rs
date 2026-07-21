@@ -1,6 +1,6 @@
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    mpsc, Arc,
 };
 
 use embedded_svc::io::Write;
@@ -91,7 +91,6 @@ fn esp_result(context: &str, code: i32) -> anyhow::Result<()> {
 #[derive(Clone)]
 pub struct Prompt {
     pcm: Arc<Vec<u8>>,
-    playing: Arc<AtomicBool>,
 }
 
 impl Prompt {
@@ -110,8 +109,37 @@ impl Prompt {
         log::info!("Loaded audio prompt: {}B PCM", pcm.len());
         Some(Self {
             pcm: Arc::new(pcm.to_vec()),
-            playing: Arc::new(AtomicBool::new(false)),
         })
+    }
+}
+
+#[derive(Clone)]
+pub struct PromptPlayer {
+    tx: mpsc::SyncSender<()>,
+    playing: Arc<AtomicBool>,
+}
+
+impl PromptPlayer {
+    pub fn start(prompt: Prompt) -> anyhow::Result<Self> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let pcm = prompt.pcm;
+        let playing = Arc::new(AtomicBool::new(false));
+        let worker_playing = playing.clone();
+
+        std::thread::Builder::new()
+            .name("audio-prompt".to_string())
+            .stack_size(4096)
+            .spawn(move || {
+                while rx.recv().is_ok() {
+                    if let Err(e) = play_pcm(&pcm) {
+                        log::error!("Audio prompt playback failed: {e:?}");
+                    }
+                    worker_playing.store(false, Ordering::Release);
+                }
+                log::info!("Audio prompt worker thread exited");
+            })?;
+
+        Ok(Self { tx, playing })
     }
 
     pub fn play_async(&self) {
@@ -123,19 +151,9 @@ impl Prompt {
             log::debug!("Audio prompt already playing, skipping");
             return;
         }
-        let pcm = self.pcm.clone();
-        let playing = self.playing.clone();
-        if let Err(e) = std::thread::Builder::new()
-            .name("audio-prompt".to_string())
-            .stack_size(4096)
-            .spawn(move || {
-                if let Err(e) = play_pcm(&pcm) {
-                    log::error!("Audio prompt playback failed: {e:?}");
-                }
-                playing.store(false, Ordering::Release);
-            })
-        {
-            log::error!("Failed to spawn audio prompt thread: {e:?}");
+
+        if let Err(e) = self.tx.try_send(()) {
+            log::error!("Failed to queue audio prompt playback: {e:?}");
             self.playing.store(false, Ordering::Release);
         }
     }
@@ -222,7 +240,6 @@ pub struct Driver;
 
 impl Driver {
     pub fn new() -> anyhow::Result<Self> {
-        init()?;
         Ok(Self)
     }
 

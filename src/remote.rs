@@ -49,7 +49,7 @@ pub async fn run(
     mut boot_button: BootButton,
     asr_tx: std::sync::mpsc::Sender<audio::AsrRequest>,
     asr_config: Option<&audio::AsrConfig>,
-    audio_prompt: Option<&audio::Prompt>,
+    audio_prompt: Option<&audio::PromptPlayer>,
     mut audio_prompt_enabled: bool,
     nvs: &esp_idf_svc::nvs::EspDefaultNvs,
 ) -> anyhow::Result<()> {
@@ -875,7 +875,7 @@ async fn open_session_picker(
     touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
     boot_button: &mut BootButton,
     backlight: &mut BacklightMode,
-    audio_prompt: Option<&audio::Prompt>,
+    audio_prompt: Option<&audio::PromptPlayer>,
     audio_prompt_enabled: &mut bool,
     nvs: &esp_idf_svc::nvs::EspDefaultNvs,
 ) -> anyhow::Result<()> {
