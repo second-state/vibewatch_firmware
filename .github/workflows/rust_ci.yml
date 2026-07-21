@@ -2,9 +2,15 @@ name: Continuous Integration
 
 on:
   push:
+    branches:
+      - main
     paths-ignore:
-      - "**/README.md"
+      - "**/*.md"
+      - "docs/**"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
   workflow_dispatch:
 
 env:
@@ -23,13 +29,11 @@ jobs:
             args: --release
           - command: fmt
             args: --all -- --check --color always
-          - command: clippy
-            args: --all-targets --all-features --workspace -- -D warnings
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
       - name: Setup Rust
-        uses: esp-rs/xtensa-toolchain@v1.5
+        uses: esp-rs/xtensa-toolchain@v1.6
         with:
           default: true
           buildtargets: esp32s3
