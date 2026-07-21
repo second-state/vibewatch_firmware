@@ -22,6 +22,7 @@ const SESSION_LIST_OFF_SHUTDOWN_PROMPT_DELAY: std::time::Duration =
     std::time::Duration::from_secs(10 * 60);
 const IDLE_SHUTDOWN_COUNTDOWN_SECS: u64 = 15;
 const SCREEN_BACKSPACE_REPEAT_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+const SCREEN_SCROLL_SWIPE_ROWS: u16 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BacklightMode {
@@ -833,9 +834,13 @@ fn scroll_swipe_message(
     }
 
     if dy < 0 {
-        Some(protocol::ClientMessage::ScrollDown { rows: 10 })
+        Some(protocol::ClientMessage::ScrollDown {
+            rows: SCREEN_SCROLL_SWIPE_ROWS,
+        })
     } else {
-        Some(protocol::ClientMessage::ScrollUp { rows: 10 })
+        Some(protocol::ClientMessage::ScrollUp {
+            rows: SCREEN_SCROLL_SWIPE_ROWS,
+        })
     }
 }
 
