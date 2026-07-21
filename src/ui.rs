@@ -663,6 +663,11 @@ impl UI {
     pub fn show_asr_editor(&mut self, text: &str, hint: &str) -> anyhow::Result<()> {
         let display = self.display.as_mut();
         display.clear(ColorFormat::CSS_BLACK)?;
+        let record_color = match hint {
+            "Connecting..." => ColorFormat::CSS_YELLOW,
+            "Listening..." => ColorFormat::CSS_GREEN,
+            _ => ColorFormat::CSS_WHEAT,
+        };
 
         let outer = Rectangle::new(
             Point::new(2, 2),
@@ -675,7 +680,7 @@ impl UI {
             .into_styled(
                 PrimitiveStyleBuilder::new()
                     .stroke_color(TEXT_LIGHT)
-                    .stroke_width(1)
+                    .stroke_width(3)
                     .build(),
             )
             .draw(display)?;
@@ -693,7 +698,7 @@ impl UI {
             rect.into_styled(
                 PrimitiveStyleBuilder::new()
                     .stroke_color(ColorFormat::CSS_WHEAT)
-                    .stroke_width(1)
+                    .stroke_width(3)
                     .build(),
             )
             .draw(display)?;
@@ -739,8 +744,8 @@ impl UI {
         record_rect
             .into_styled(
                 PrimitiveStyleBuilder::new()
-                    .stroke_color(ColorFormat::CSS_WHEAT)
-                    .stroke_width(2)
+                    .stroke_color(record_color)
+                    .stroke_width(3)
                     .build(),
             )
             .draw(display)?;
@@ -759,7 +764,7 @@ impl UI {
             hint_rect,
             shifted_text_style(
                 u8g2_fonts::fonts::u8g2_font_wqy12_t_gb2312a,
-                ColorFormat::CSS_WHEAT,
+                record_color,
                 3,
             ),
             hint_style,

@@ -535,24 +535,34 @@ async fn record_asr_once(
         return Err(anyhow::anyhow!("ASR not configured"));
     };
 
+    let (listening_tx, listening_rx) = tokio::sync::oneshot::channel();
     let (respond, result) = tokio::sync::oneshot::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let req = audio::AsrRequest {
         config,
         cancel: cancel.clone(),
+        listening: listening_tx,
         respond,
     };
 
-    let _ = gui.show_asr_editor(display_text, "Listening...");
+    let _ = gui.show_asr_editor(display_text, "Connecting...");
 
     if asr_tx.send(req).is_err() {
         wait_touch_release(touch_rx).await;
         return Err(anyhow::anyhow!("ASR unavailable"));
     }
 
+    let mut listening = std::pin::pin!(listening_rx);
     let mut result = std::pin::pin!(result);
+    let mut is_listening = false;
     let asr_result = loop {
         tokio::select! {
+            response = &mut listening, if !is_listening => {
+                is_listening = true;
+                if response.is_ok() {
+                    let _ = gui.show_asr_editor(display_text, "Listening...");
+                }
+            }
             response = &mut result => {
                 break response.unwrap_or_else(|_| Err(anyhow::anyhow!("ASR worker dropped request")));
             }

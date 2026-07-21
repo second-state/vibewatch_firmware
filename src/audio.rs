@@ -207,6 +207,7 @@ impl AsrConfig {
 pub struct AsrRequest {
     pub config: AsrConfig,
     pub cancel: Arc<std::sync::atomic::AtomicBool>,
+    pub listening: tokio::sync::oneshot::Sender<()>,
     pub respond: tokio::sync::oneshot::Sender<anyhow::Result<String>>,
 }
 

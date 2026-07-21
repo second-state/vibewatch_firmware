@@ -144,10 +144,15 @@ fn main() -> anyhow::Result<()> {
                 .map_err(|e| log::error!("Failed to create audio driver: {e:?}"))
                 .ok();
             while let Ok(req) = asr_rx.recv() {
+                let mut listening = Some(req.listening);
                 let result = match driver.as_mut() {
                     Some(driver) => driver.start_asr(
                         &req.config,
-                        || {},
+                        || {
+                            if let Some(tx) = listening.take() {
+                                let _ = tx.send(());
+                            }
+                        },
                         || req.cancel.load(std::sync::atomic::Ordering::Relaxed),
                     ),
                     None => Err(anyhow::anyhow!("audio driver unavailable")),
