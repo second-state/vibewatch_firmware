@@ -300,6 +300,8 @@ async fn show_boot_menu(
         boot_menu_item(3, sound_label, crate::ui::UiColor::CSS_GREEN),
         boot_menu_item(4, "Back", crate::ui::UiColor::CSS_BLACK),
     ];
+    gui.display_list("System", &[])?;
+    wait_touch_release(touch_rx).await;
     let index = select_remote_list_item(server, gui, touch_rx, "System", &items).await?;
     Ok(match index {
         0 => BootMenuAction::Restart,
