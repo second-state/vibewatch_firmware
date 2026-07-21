@@ -5,7 +5,7 @@ use esp_idf_svc::{
 };
 use log::{info, warn};
 
-use crate::setting::{pick_cred, WifiCred};
+use crate::setting::WifiCred;
 
 const DEFAULT_SNTP_SERVERS: [&str; 4] = [
     "time.windows.com",
@@ -14,7 +14,7 @@ const DEFAULT_SNTP_SERVERS: [&str; 4] = [
     "time.cloudflare.com",
 ];
 
-/// 以 STA 连接:扫描周围 WiFi,从 `wifi_list` 里挑第一个在范围内的(顺序=优先级)连上。
+/// 以 STA 连接:按 `wifi_list` 顺序逐个直连(顺序=优先级),不做预扫描。
 pub fn wifi_connect(
     modem: impl WifiModemPeripheral + 'static,
     sysloop: EspSystemEventLoop,
@@ -23,50 +23,66 @@ pub fn wifi_connect(
     let mut esp_wifi = EspWifi::new(modem, sysloop.clone(), None)?;
     let mut wifi = BlockingWifi::wrap(&mut esp_wifi, sysloop)?;
 
-    // 先以默认 Client 起来,才能 scan。
     wifi.set_configuration(&Configuration::Client(ClientConfiguration::default()))?;
     info!("Starting wifi...");
     wifi.start()?;
 
-    info!("Scanning...");
-    let scan_list: Vec<String> = wifi
-        .scan()?
-        .into_iter()
-        .map(|a| a.ssid.as_str().to_string())
-        .collect();
+    let mut last_error = None;
+    for (index, cred) in wifi_list
+        .iter()
+        .filter(|cred| !cred.ssid.is_empty())
+        .enumerate()
+    {
+        let auth_method = if cred.pass.is_empty() {
+            AuthMethod::None
+        } else {
+            AuthMethod::WPA2Personal
+        };
+        info!(
+            "Connecting WiFi candidate {}: {} (auth {:?})",
+            index, cred.ssid, auth_method
+        );
+        wifi.set_configuration(&Configuration::Client(ClientConfiguration {
+            ssid: cred
+                .ssid
+                .as_str()
+                .try_into()
+                .expect("Could not parse the given SSID into WiFi config"),
+            password: cred
+                .pass
+                .as_str()
+                .try_into()
+                .expect("Could not parse the given password into WiFi config"),
+            auth_method,
+            ..Default::default()
+        }))?;
 
-    let cred = pick_cred(&scan_list, wifi_list).ok_or_else(|| {
-        anyhow::anyhow!(
-            "no configured WiFi in range (scan saw {} networks)",
-            scan_list.len()
-        )
-    })?;
+        info!("Connecting wifi...");
+        match wifi.connect().and_then(|_| {
+            info!("Waiting for DHCP lease...");
+            wifi.wait_netif_up()
+        }) {
+            Ok(()) => {
+                info!("Connected to WiFi {}", cred.ssid);
+                last_error = None;
+                break;
+            }
+            Err(e) => {
+                warn!("WiFi candidate {} ({}) failed: {e:?}", index, cred.ssid);
+                last_error = Some(e);
+                let _ = wifi.disconnect();
+            }
+        }
+    }
 
-    let auth_method = if cred.pass.is_empty() {
-        AuthMethod::None
-    } else {
-        AuthMethod::WPA2Personal
-    };
-    info!("Connecting to {} (auth {:?})", cred.ssid, auth_method);
-    wifi.set_configuration(&Configuration::Client(ClientConfiguration {
-        ssid: cred
-            .ssid
-            .as_str()
-            .try_into()
-            .expect("Could not parse the given SSID into WiFi config"),
-        password: cred
-            .pass
-            .as_str()
-            .try_into()
-            .expect("Could not parse the given password into WiFi config"),
-        auth_method,
-        ..Default::default()
-    }))?;
-
-    info!("Connecting wifi...");
-    wifi.connect()?;
-    info!("Waiting for DHCP lease...");
-    wifi.wait_netif_up()?;
+    if let Some(e) = last_error {
+        return Err(anyhow::anyhow!(
+            "all configured WiFi candidates failed: {e:?}"
+        ));
+    }
+    if wifi_list.iter().all(|cred| cred.ssid.is_empty()) {
+        return Err(anyhow::anyhow!("wifi_list is empty"));
+    }
 
     let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
     info!("Wifi DHCP info: {:?}", ip_info);

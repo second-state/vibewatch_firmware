@@ -18,13 +18,6 @@ pub struct WifiCred {
     pub pass: String,
 }
 
-/// 在已配置凭据里挑第一个出现在扫描结果中的(顺序即优先级)。
-pub fn pick_cred<'a>(scan_list: &[String], creds: &'a [WifiCred]) -> Option<&'a WifiCred> {
-    creds
-        .iter()
-        .find(|c| scan_list.iter().any(|s| s == &c.ssid))
-}
-
 #[derive(Debug, Clone)]
 pub struct Setting {
     /// 多组已配置 WiFi;连接时与扫描结果匹配,顺序即优先级。

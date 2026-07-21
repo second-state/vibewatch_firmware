@@ -243,9 +243,38 @@
                     markWifiModified();
                 });
 
+                const actions = document.createElement('div');
+                actions.className = 'flex justify-end gap-2';
+
+                const upBtn = document.createElement('button');
+                upBtn.className = 'btn btn-xs btn-outline';
+                upBtn.textContent = 'Up';
+                upBtn.disabled = i === 0;
+                upBtn.addEventListener('click', () => {
+                    if (i === 0) return;
+                    [wifiList[i - 1], wifiList[i]] = [wifiList[i], wifiList[i - 1]];
+                    renderWifiRows();
+                    markWifiModified();
+                });
+
+                const downBtn = document.createElement('button');
+                downBtn.className = 'btn btn-xs btn-outline';
+                downBtn.textContent = 'Down';
+                downBtn.disabled = i === wifiList.length - 1;
+                downBtn.addEventListener('click', () => {
+                    if (i >= wifiList.length - 1) return;
+                    [wifiList[i], wifiList[i + 1]] = [wifiList[i + 1], wifiList[i]];
+                    renderWifiRows();
+                    markWifiModified();
+                });
+
+                actions.appendChild(upBtn);
+                actions.appendChild(downBtn);
+                actions.appendChild(removeBtn);
+
                 row.appendChild(ssidInput);
                 row.appendChild(passInput);
-                row.appendChild(removeBtn);
+                row.appendChild(actions);
                 wifiListContainer.appendChild(row);
             });
         }
