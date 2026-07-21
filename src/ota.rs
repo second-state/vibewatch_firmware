@@ -8,8 +8,18 @@ use esp_idf_svc::{
     ota::EspOta,
 };
 
-pub const OTA_DOWNLOAD_URL: &str =
-    "https://github.com/L-jasmine/vibekeys_firmware/releases/latest/download/esp32-s3-hello_ota.bin";
+/// URL used by the "download latest" OTA action.
+///
+/// Defaults to this watch firmware's stable GitHub release asset. CI or local
+/// release builds can override it with `VIBEKEYS_OTA_URL`, for example to pin a
+/// prerelease tag that GitHub's `releases/latest` would not return.
+const DEFAULT_OTA_URL: &str =
+    "https://github.com/L-jasmine/esp32-s3-hello/releases/latest/download/esp32-s3-hello_ota.bin";
+
+pub const OTA_DOWNLOAD_URL: &str = match option_env!("VIBEKEYS_OTA_URL") {
+    Some(url) => url,
+    None => DEFAULT_OTA_URL,
+};
 
 static OTA_INDEX_HTML: &str = include_str!("../assets/ota_index.html");
 

@@ -1,0 +1,74 @@
+name: Pre-Release
+
+on:
+  push:
+    tags:
+      - "v*-rc*"
+      - "v*-beta*"
+      - "v*-alpha*"
+      - "v*-pre*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Pre-release tag (e.g. v0.1.0-rc1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build Pre-Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: esp-rs/xtensa-toolchain@v1.5
+        with:
+          default: true
+          buildtargets: esp32s3
+          ldproxy: true
+
+      - name: Enable caching
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install espflash
+        run: cargo install --locked espflash
+
+      - name: Build firmware images
+        run: ./build.sh all
+        env:
+          VIBEKEYS_OTA_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.release_tag || github.ref_name }}/esp32-s3-hello_ota.bin
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-s3-hello
+          path: |
+            ./esp32-s3-hello_ota.bin
+            ./esp32-s3-hello_factory.bin
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          prerelease: true
+          make_latest: "false"
+          generate_release_notes: true
+          files: artifacts/**/*
