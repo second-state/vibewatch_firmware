@@ -17,7 +17,7 @@ use crate::{
 const BACKLIGHT_NORMAL: u8 = 50;
 const SESSION_LIST_IDLE_OFF_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 const SESSION_LIST_LONG_PRESS_MENU_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
-const SESSION_LIST_LONG_PRESS_CANCEL_VERTICAL_PX: i32 = 80;
+const SESSION_LIST_LONG_PRESS_CANCEL_VERTICAL_PX: i32 = 50;
 const SESSION_LIST_OFF_SHUTDOWN_PROMPT_DELAY: std::time::Duration =
     std::time::Duration::from_secs(10 * 60);
 const IDLE_SHUTDOWN_COUNTDOWN_SECS: u64 = 15;
