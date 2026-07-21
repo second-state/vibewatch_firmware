@@ -16,6 +16,8 @@ use crate::{
 
 const BACKLIGHT_NORMAL: u8 = 50;
 const SESSION_LIST_IDLE_OFF_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+const SESSION_LIST_LONG_PRESS_MENU_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+const SESSION_LIST_LONG_PRESS_CANCEL_VERTICAL_PX: i32 = 80;
 const SESSION_LIST_OFF_SHUTDOWN_PROMPT_DELAY: std::time::Duration =
     std::time::Duration::from_secs(10 * 60);
 const IDLE_SHUTDOWN_COUNTDOWN_SECS: u64 = 15;
@@ -912,6 +914,7 @@ async fn open_session_picker(
         render_session_picker(server, gui, &mut labels, &mut item_rects, scroll_offset);
 
     let mut press_touch = None;
+    let mut press_started_at = None;
     let mut last_list_change = tokio::time::Instant::now();
     let mut next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
     let mut off_since = None;
@@ -957,7 +960,20 @@ async fn open_session_picker(
                 }
             }
             _ = crate::boot::wait_boot_press(boot_button) => {
-                log::info!("BOOT menu requested from session list");
+                log::info!("BOOT button pressed from session list, turning screen off");
+                backlight.set(BacklightMode::Off)?;
+                off_since = Some(tokio::time::Instant::now());
+                press_touch = None;
+                press_started_at = None;
+            }
+            _ = tokio::time::sleep_until(
+                press_started_at
+                    .map(|instant| instant + SESSION_LIST_LONG_PRESS_MENU_DELAY)
+                    .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(3600))
+            ), if press_started_at.is_some() && *backlight != BacklightMode::Off => {
+                log::info!("Session list long press detected, opening BOOT menu");
+                press_touch = None;
+                press_started_at = None;
                 match show_boot_menu(server, gui, touch_rx, *audio_prompt_enabled).await? {
                     BootMenuAction::Restart => {
                         log::warn!("BOOT menu restart selected");
@@ -1016,6 +1032,7 @@ async fn open_session_picker(
                     last_list_change = tokio::time::Instant::now();
                     next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
                     press_touch = None;
+                    press_started_at = None;
                     last_session_title = render_session_picker(
                         server,
                         gui,
@@ -1029,9 +1046,19 @@ async fn open_session_picker(
                     Some(lcd::TouchEvent::Press(touch)) => {
                         if press_touch.is_none() {
                             press_touch = Some(touch);
+                            press_started_at = Some(tokio::time::Instant::now());
+                        } else if let Some(start) = press_touch {
+                            let dy = touch.y as i32 - start.y as i32;
+                            if dy.abs() > SESSION_LIST_LONG_PRESS_CANCEL_VERTICAL_PX {
+                                log::debug!(
+                                    "Session list long press cancelled by vertical movement: dy={dy}"
+                                );
+                                press_started_at = None;
+                            }
                         }
                     }
                     Some(lcd::TouchEvent::Release(touch)) => {
+                        press_started_at = None;
                         let Some(start) = press_touch.take() else {
                             continue;
                         };
