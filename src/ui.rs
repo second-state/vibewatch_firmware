@@ -8,7 +8,7 @@ use embedded_graphics::{
         Rgb565, RgbColor,
     },
     prelude::*,
-    primitives::{PrimitiveStyleBuilder, Rectangle},
+    primitives::{Line, PrimitiveStyleBuilder, Rectangle},
     text::{Alignment, Text},
 };
 use embedded_text::TextBox;
@@ -975,6 +975,56 @@ impl UI {
         };
         screen.flush_to_lcd()?;
         Ok(true)
+    }
+
+    pub fn show_session_backspace_overlay(&mut self) -> anyhow::Result<()> {
+        let rect = Rectangle::new(Point::zero(), Size::new((DISPLAY_WIDTH / 3) as u32, 80));
+        let display = self.display.as_mut();
+        rect.into_styled(
+            PrimitiveStyleBuilder::new()
+                .fill_color(ColorFormat::CSS_BLACK)
+                .build(),
+        )
+        .draw(display)?;
+
+        let box_rect = Rectangle::new(
+            Point::new(8, 8),
+            Size::new((DISPLAY_WIDTH / 3).saturating_sub(16) as u32, 64),
+        );
+        box_rect
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .stroke_color(ColorFormat::CSS_WHEAT)
+                    .stroke_width(3)
+                    .fill_color(ColorFormat::CSS_BLACK)
+                    .build(),
+            )
+            .draw(display)?;
+
+        let icon_style = PrimitiveStyleBuilder::new()
+            .stroke_color(ColorFormat::CSS_WHEAT)
+            .stroke_width(4)
+            .build();
+        let x0 = box_rect.top_left.x + 18;
+        let x1 = box_rect.top_left.x + 42;
+        let x2 = box_rect.top_left.x + box_rect.size.width as i32 - 18;
+        let y0 = box_rect.top_left.y + 16;
+        let y1 = box_rect.top_left.y + box_rect.size.height as i32 / 2;
+        let y2 = box_rect.top_left.y + box_rect.size.height as i32 - 16;
+        for line in [
+            Line::new(Point::new(x0, y1), Point::new(x1, y0)),
+            Line::new(Point::new(x1, y0), Point::new(x2, y0)),
+            Line::new(Point::new(x2, y0), Point::new(x2, y2)),
+            Line::new(Point::new(x2, y2), Point::new(x1, y2)),
+            Line::new(Point::new(x1, y2), Point::new(x0, y1)),
+            Line::new(Point::new(x1 + 24, y0 + 14), Point::new(x2 - 20, y2 - 14)),
+            Line::new(Point::new(x2 - 20, y0 + 14), Point::new(x1 + 24, y2 - 14)),
+        ] {
+            line.into_styled(icon_style).draw(display)?;
+        }
+
+        let _ = self.flush_terminal_dirty(rect)?;
+        Ok(())
     }
 
     // 横向42个字符

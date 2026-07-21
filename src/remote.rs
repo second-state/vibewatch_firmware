@@ -21,6 +21,7 @@ const SESSION_LIST_LONG_PRESS_CANCEL_VERTICAL_PX: i32 = 50;
 const SESSION_LIST_OFF_SHUTDOWN_PROMPT_DELAY: std::time::Duration =
     std::time::Duration::from_secs(10 * 60);
 const IDLE_SHUTDOWN_COUNTDOWN_SECS: u64 = 15;
+const SCREEN_BACKSPACE_REPEAT_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BacklightMode {
@@ -83,20 +84,53 @@ pub async fn run(
     .await?;
 
     let mut swipe_start = None;
+    let mut backspace_touch_active = false;
+    let mut backspace_repeat_sent = false;
+    let mut next_backspace_at = None;
     // 选定会话后:主循环,解码并刷屏
     loop {
         // 把活跃会话落实为 `{prefix}/screen` 订阅(不可被取消)。
         server.flush_pending().await?;
 
         tokio::select! {
+            _ = async {
+                match next_backspace_at {
+                    Some(when) => tokio::time::sleep_until(when).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if backspace_touch_active => {
+                send_backspace_key(&mut server).await?;
+                backspace_repeat_sent = true;
+                next_backspace_at = Some(tokio::time::Instant::now() + SCREEN_BACKSPACE_REPEAT_DELAY);
+            }
             event = touch_rx.recv() => {
                 match event {
                     Some(lcd::TouchEvent::Press(touch)) => {
-                        if swipe_start.is_none() {
+                        if backspace_touch_active {
+                            continue;
+                        }
+                        if is_screen_backspace_point(touch) {
+                            log::info!("Screen backspace touch started");
+                            backspace_touch_active = true;
+                            backspace_repeat_sent = false;
+                            next_backspace_at = Some(tokio::time::Instant::now() + SCREEN_BACKSPACE_REPEAT_DELAY);
+                            swipe_start = None;
+                            gui.show_session_backspace_overlay()?;
+                        } else if swipe_start.is_none() {
                             swipe_start = Some(touch);
                         }
                     }
                     Some(lcd::TouchEvent::Release(touch)) => {
+                        if backspace_touch_active {
+                            log::info!("Screen backspace touch released");
+                            backspace_touch_active = false;
+                            next_backspace_at = None;
+                            if !backspace_repeat_sent {
+                                send_backspace_key(&mut server).await?;
+                            }
+                            redraw_active_cached_screen(&server, gui)?;
+                            continue;
+                        }
                         if let Some(start) = swipe_start.take() {
                             let dx = touch.x as i32 - start.x as i32;
                             let dy = touch.y as i32 - start.y as i32;
@@ -151,6 +185,9 @@ pub async fn run(
                     break;
                 };
                 handle_mqtt_event(ev, gui, &mut backlight).await?;
+                if backspace_touch_active {
+                    gui.show_session_backspace_overlay()?;
+                }
             }
         }
     }
@@ -333,6 +370,12 @@ async fn show_screen_action_menu(
         send_active_sync(server, false).await?;
     }
     Ok(())
+}
+
+async fn send_backspace_key(server: &mut MqttServer) -> anyhow::Result<()> {
+    server
+        .send(protocol::ClientMessage::pty_input_str("\x7f"))
+        .await
 }
 
 fn redraw_active_cached_screen(server: &MqttServer, gui: &mut UI) -> anyhow::Result<()> {
@@ -768,6 +811,10 @@ fn is_screen_menu_touch(start: lcd::TouchPoint, end: lcd::TouchPoint) -> bool {
 
 fn is_screen_menu_point(touch: lcd::TouchPoint) -> bool {
     touch.y < 80 && touch.x >= lcd::LCD_WIDTH * 2 / 3
+}
+
+fn is_screen_backspace_point(touch: lcd::TouchPoint) -> bool {
+    touch.y < 80 && touch.x < lcd::LCD_WIDTH / 3
 }
 
 fn scroll_swipe_message(
