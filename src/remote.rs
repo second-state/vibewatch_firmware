@@ -88,6 +88,7 @@ pub async fn run(
     let mut backspace_touch_active = false;
     let mut backspace_repeat_sent = false;
     let mut next_backspace_at = None;
+    let mut screen_menu_touch_active = false;
     // 选定会话后:主循环,解码并刷屏
     loop {
         // 把活跃会话落实为 `{prefix}/screen` 订阅(不可被取消)。
@@ -107,7 +108,7 @@ pub async fn run(
             event = touch_rx.recv() => {
                 match event {
                     Some(lcd::TouchEvent::Press(touch)) => {
-                        if backspace_touch_active {
+                        if backspace_touch_active || screen_menu_touch_active {
                             continue;
                         }
                         if is_screen_backspace_point(touch) {
@@ -117,6 +118,11 @@ pub async fn run(
                             next_backspace_at = Some(tokio::time::Instant::now() + SCREEN_BACKSPACE_REPEAT_DELAY);
                             swipe_start = None;
                             gui.show_session_backspace_overlay()?;
+                        } else if is_screen_menu_point(touch) {
+                            log::info!("Screen menu touch started");
+                            screen_menu_touch_active = true;
+                            swipe_start = None;
+                            gui.show_session_menu_overlay()?;
                         } else if swipe_start.is_none() {
                             swipe_start = Some(touch);
                         }
@@ -130,6 +136,15 @@ pub async fn run(
                                 send_backspace_key(&mut server).await?;
                             }
                             redraw_active_cached_screen(&server, gui)?;
+                            continue;
+                        }
+                        if screen_menu_touch_active {
+                            log::info!("Screen menu touch released");
+                            screen_menu_touch_active = false;
+                            redraw_active_cached_screen(&server, gui)?;
+                            if is_screen_menu_point(touch) {
+                                show_screen_action_menu(&mut server, gui, &mut touch_rx).await?;
+                            }
                             continue;
                         }
                         if let Some(start) = swipe_start.take() {
@@ -188,6 +203,8 @@ pub async fn run(
                 handle_mqtt_event(ev, gui, &mut backlight).await?;
                 if backspace_touch_active {
                     gui.show_session_backspace_overlay()?;
+                } else if screen_menu_touch_active {
+                    gui.show_session_menu_overlay()?;
                 }
             }
         }

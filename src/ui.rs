@@ -679,7 +679,7 @@ impl UI {
         outer
             .into_styled(
                 PrimitiveStyleBuilder::new()
-                    .stroke_color(TEXT_LIGHT)
+                    .stroke_color(record_color)
                     .stroke_width(3)
                     .build(),
             )
@@ -978,29 +978,7 @@ impl UI {
     }
 
     pub fn show_session_backspace_overlay(&mut self) -> anyhow::Result<()> {
-        let rect = Rectangle::new(Point::zero(), Size::new((DISPLAY_WIDTH / 3) as u32, 80));
-        let display = self.display.as_mut();
-        rect.into_styled(
-            PrimitiveStyleBuilder::new()
-                .fill_color(ColorFormat::CSS_BLACK)
-                .build(),
-        )
-        .draw(display)?;
-
-        let box_rect = Rectangle::new(
-            Point::new(8, 8),
-            Size::new((DISPLAY_WIDTH / 3).saturating_sub(16) as u32, 64),
-        );
-        box_rect
-            .into_styled(
-                PrimitiveStyleBuilder::new()
-                    .stroke_color(ColorFormat::CSS_WHEAT)
-                    .stroke_width(3)
-                    .fill_color(ColorFormat::CSS_BLACK)
-                    .build(),
-            )
-            .draw(display)?;
-
+        let (rect, box_rect) = self.draw_session_top_overlay_box(0)?;
         let icon_style = PrimitiveStyleBuilder::new()
             .stroke_color(ColorFormat::CSS_WHEAT)
             .stroke_width(4)
@@ -1020,11 +998,66 @@ impl UI {
             Line::new(Point::new(x1 + 24, y0 + 14), Point::new(x2 - 20, y2 - 14)),
             Line::new(Point::new(x2 - 20, y0 + 14), Point::new(x1 + 24, y2 - 14)),
         ] {
-            line.into_styled(icon_style).draw(display)?;
+            line.into_styled(icon_style).draw(self.display.as_mut())?;
         }
 
         let _ = self.flush_terminal_dirty(rect)?;
         Ok(())
+    }
+
+    pub fn show_session_menu_overlay(&mut self) -> anyhow::Result<()> {
+        let (rect, box_rect) = self.draw_session_top_overlay_box(2)?;
+        let icon_style = PrimitiveStyleBuilder::new()
+            .stroke_color(ColorFormat::CSS_WHEAT)
+            .stroke_width(4)
+            .build();
+        let x0 = box_rect.top_left.x + 28;
+        let x1 = box_rect.top_left.x + box_rect.size.width as i32 - 28;
+        let center_y = box_rect.top_left.y + box_rect.size.height as i32 / 2;
+        for y in [center_y - 14, center_y, center_y + 14] {
+            Line::new(Point::new(x0, y), Point::new(x1, y))
+                .into_styled(icon_style)
+                .draw(self.display.as_mut())?;
+        }
+
+        let _ = self.flush_terminal_dirty(rect)?;
+        Ok(())
+    }
+
+    fn draw_session_top_overlay_box(
+        &mut self,
+        third_index: usize,
+    ) -> anyhow::Result<(Rectangle, Rectangle)> {
+        let third_w = DISPLAY_WIDTH / 3;
+        let x = (third_w * third_index) as i32;
+        let w = if third_index == 2 {
+            DISPLAY_WIDTH - third_w * 2
+        } else {
+            third_w
+        };
+        let rect = Rectangle::new(Point::new(x, 0), Size::new(w as u32, 80));
+        let display = self.display.as_mut();
+        rect.into_styled(
+            PrimitiveStyleBuilder::new()
+                .fill_color(ColorFormat::CSS_BLACK)
+                .build(),
+        )
+        .draw(display)?;
+
+        let box_rect = Rectangle::new(
+            Point::new(x + 8, 8),
+            Size::new(w.saturating_sub(16) as u32, 64),
+        );
+        box_rect
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .stroke_color(ColorFormat::CSS_WHEAT)
+                    .stroke_width(3)
+                    .fill_color(ColorFormat::CSS_BLACK)
+                    .build(),
+            )
+            .draw(display)?;
+        Ok((rect, box_rect))
     }
 
     // 横向42个字符
