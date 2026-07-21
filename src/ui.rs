@@ -319,7 +319,7 @@ pub fn terminal_text_cells() -> (u16, u16) {
 const ALPHA: f32 = 0.5;
 const MENU_START_Y: u16 = 30;
 const MENU_COLUMNS: usize = 2;
-const MENU_ROWS: u16 = 8;
+const MENU_ROWS: u16 = 4;
 const MENU_COLUMN_GAP: i32 = 4;
 const MENU_FONT_H: u16 = 17;
 const MENU_FOOTER_H: i32 = 24;
