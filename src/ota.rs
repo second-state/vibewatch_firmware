@@ -69,17 +69,29 @@ where
             }
         })?;
 
-    let items = vec![("Update release".to_string(), false)];
+    let items = vec![
+        ("Update release".to_string(), false),
+        ("Restart".to_string(), false),
+    ];
     let title = format!("OTA: {}", ip);
     let index = crate::ui::select_menu_item(gui, touch_rx, &title, &items).await?;
-    if index == 0 {
-        log::info!("OTA screen button selected: download latest");
-        gui.show_status("OTA Mode", "Downloading latest...\nDevice will reboot")
-            .ok();
-        screen_tx.send(OtaEvent::DownloadLatest).map_err(|e| {
-            log::error!("OTA channel closed: {:?}", e);
-            anyhow::anyhow!("OTA channel closed: {:?}", e)
-        })?;
+    match index {
+        0 => {
+            log::info!("OTA screen button selected: download latest");
+            gui.show_status("OTA Mode", "Downloading latest...\nDevice will reboot")
+                .ok();
+            screen_tx.send(OtaEvent::DownloadLatest).map_err(|e| {
+                log::error!("OTA channel closed: {:?}", e);
+                anyhow::anyhow!("OTA channel closed: {:?}", e)
+            })?;
+        }
+        1 => {
+            log::info!("OTA screen button selected: restart");
+            gui.show_status("OTA Mode", "Restarting...").ok();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            restart();
+        }
+        _ => unreachable!(),
     }
 
     let _ = ota_worker.join();
