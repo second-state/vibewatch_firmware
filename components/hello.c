@@ -329,6 +329,38 @@ int board_audio_init(void)
     return ESP_OK;
 }
 
+int board_audio_close(void)
+{
+    int first_err = ESP_OK;
+
+    if (speaker_handle != NULL && speaker_opened) {
+        int err = esp_codec_dev_close(speaker_handle);
+        if (err != ESP_CODEC_DEV_OK) {
+            ESP_LOGW(TAG, "esp_codec_dev_close speaker failed: %d", err);
+            first_err = err;
+        } else {
+            speaker_opened = false;
+        }
+    }
+
+    if (microphone_handle != NULL && microphone_opened) {
+        int err = esp_codec_dev_close(microphone_handle);
+        if (err != ESP_CODEC_DEV_OK) {
+            ESP_LOGW(TAG, "esp_codec_dev_close microphone failed: %d", err);
+            if (first_err == ESP_OK) {
+                first_err = err;
+            }
+        } else {
+            microphone_opened = false;
+        }
+    }
+
+    if (first_err == ESP_OK) {
+        ESP_LOGI(TAG, "Audio codecs closed");
+    }
+    return first_err;
+}
+
 int board_audio_read_mic(void *data, int len)
 {
     if (data == NULL || len <= 0) {

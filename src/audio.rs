@@ -11,6 +11,7 @@ const PROMPT_ENABLED_KEY: &str = "audio_prompt_on";
 
 extern "C" {
     fn board_audio_init() -> std::ffi::c_int;
+    fn board_audio_close() -> std::ffi::c_int;
     fn board_audio_read_mic(data: *mut std::ffi::c_void, len: std::ffi::c_int) -> std::ffi::c_int;
     fn board_audio_write_speaker(
         data: *const std::ffi::c_void,
@@ -19,8 +20,15 @@ extern "C" {
 }
 
 pub fn init() -> anyhow::Result<()> {
+    log::info!("audio init");
     let code = unsafe { board_audio_init() };
     esp_result("board_audio_init", code)
+}
+
+pub fn close() -> anyhow::Result<()> {
+    log::info!("audio close");
+    let code = unsafe { board_audio_close() };
+    esp_result("board_audio_close", code)
 }
 
 pub fn read_mic_i16(samples: &mut [i16]) -> anyhow::Result<usize> {

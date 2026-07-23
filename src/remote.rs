@@ -37,6 +37,9 @@ impl BacklightMode {
         }
         if mode == Self::Normal {
             crate::power::hold_light_sleep_lock()?;
+            if let Err(e) = crate::audio::init() {
+                log::warn!("Failed to reopen audio after screen on: {e:?}");
+            }
         }
         let level = match mode {
             Self::Normal => BACKLIGHT_NORMAL,
@@ -44,6 +47,9 @@ impl BacklightMode {
         };
         crate::lcd::set_backlight(level)?;
         if mode == Self::Off {
+            if let Err(e) = crate::audio::close() {
+                log::warn!("Failed to close audio before light sleep: {e:?}");
+            }
             crate::power::release_light_sleep_lock()?;
         }
         *self = mode;

@@ -62,6 +62,7 @@ pub fn release_light_sleep_lock() -> anyhow::Result<()> {
     let code = unsafe { esp_idf_svc::sys::esp_pm_lock_release(handle) };
     if code == esp_idf_svc::sys::ESP_OK as i32 {
         log::info!("Light sleep lock released");
+        dump_pm_locks_to_stdout();
         Ok(())
     } else {
         LIGHT_SLEEP_LOCK_HELD.store(true, Ordering::SeqCst);
@@ -90,6 +91,22 @@ fn light_sleep_lock_handle() -> anyhow::Result<esp_idf_svc::sys::esp_pm_lock_han
     LIGHT_SLEEP_LOCK.store(handle, Ordering::SeqCst);
     log::info!("Light sleep lock created for display");
     Ok(handle)
+}
+
+fn dump_pm_locks_to_stdout() {
+    log::info!("Dumping PM locks to stdout");
+    let stdout = unsafe {
+        core::ptr::addr_of_mut!(esp_idf_svc::sys::__sf)
+            .cast::<esp_idf_svc::sys::FILE>()
+            .add(1)
+    };
+    let code = unsafe { esp_idf_svc::sys::esp_pm_dump_locks(stdout) };
+    if code != esp_idf_svc::sys::ESP_OK as i32 {
+        log::warn!("esp_pm_dump_locks(stdout) failed: esp_err_t={code}");
+    }
+    unsafe {
+        esp_idf_svc::sys::fflush(stdout);
+    }
 }
 
 pub fn start_power_key_worker() {
