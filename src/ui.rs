@@ -501,6 +501,24 @@ fn main_menu_title() -> String {
     }
 }
 
+fn list_title_color(title: &str) -> ColorFormat {
+    let Some(rest) = title.split("Battery ").nth(1) else {
+        return TEXT_LIGHT;
+    };
+    let Some(percent_text) = rest.split('%').next() else {
+        return TEXT_LIGHT;
+    };
+    let Ok(percent) = percent_text.parse::<u8>() else {
+        return TEXT_LIGHT;
+    };
+
+    match percent {
+        0..=20 => ColorFormat::CSS_RED,
+        21..=60 => ColorFormat::CSS_DARK_ORANGE,
+        _ => ColorFormat::CSS_DARK_GREEN,
+    }
+}
+
 pub async fn setting_menu(
     gui: &mut UI,
     touch_rx: &mut tokio::sync::mpsc::Receiver<crate::lcd::TouchEvent>,
@@ -1134,7 +1152,10 @@ impl UI {
         Text::with_alignment(
             title,
             Point::new((DISPLAY_WIDTH / 2) as i32, 18),
-            U8g2TextStyle::new(u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312, TEXT_LIGHT),
+            U8g2TextStyle::new(
+                u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
+                list_title_color(title),
+            ),
             Alignment::Center,
         )
         .draw(display)?;
@@ -1222,7 +1243,10 @@ impl UI {
         Text::with_alignment(
             title,
             Point::new((DISPLAY_WIDTH / 2) as i32, 18),
-            U8g2TextStyle::new(u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312, TEXT_LIGHT),
+            U8g2TextStyle::new(
+                u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
+                list_title_color(title),
+            ),
             Alignment::Center,
         )
         .draw(self.display.as_mut())?;
