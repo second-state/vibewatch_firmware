@@ -86,6 +86,7 @@ pub fn wifi_connect(
 
     let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
     info!("Wifi DHCP info: {:?}", ip_info);
+    enable_wifi_power_save()?;
 
     if let Err(e) = sync_time() {
         warn!("SNTP sync failed after WiFi connect: {e:?}");
@@ -113,4 +114,18 @@ fn sync_time() -> anyhow::Result<()> {
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
     Err(anyhow::anyhow!("SNTP sync timeout"))
+}
+
+fn enable_wifi_power_save() -> anyhow::Result<()> {
+    let code = unsafe {
+        esp_idf_svc::sys::esp_wifi_set_ps(esp_idf_svc::sys::wifi_ps_type_t_WIFI_PS_MAX_MODEM)
+    };
+    if code == esp_idf_svc::sys::ESP_OK as i32 {
+        info!("WiFi power save enabled: WIFI_PS_MAX_MODEM");
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "esp_wifi_set_ps(WIFI_PS_MAX_MODEM) failed: esp_err_t={code}"
+        ))
+    }
 }

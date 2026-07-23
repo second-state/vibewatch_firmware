@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::Duration;
 
 extern "C" {
@@ -9,6 +9,9 @@ extern "C" {
 }
 
 static POWER_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+static LIGHT_SLEEP_LOCK: AtomicPtr<esp_idf_svc::sys::esp_pm_lock> =
+    AtomicPtr::new(std::ptr::null_mut());
+static LIGHT_SLEEP_LOCK_HELD: AtomicBool = AtomicBool::new(false);
 
 pub fn init() -> anyhow::Result<()> {
     esp_err("board_pmu_init", unsafe { board_pmu_init() })
@@ -18,7 +21,7 @@ pub fn init_cpu_frequency_scaling() -> anyhow::Result<()> {
     let config = esp_idf_svc::sys::esp_pm_config_t {
         max_freq_mhz: 240,
         min_freq_mhz: 40,
-        light_sleep_enable: false,
+        light_sleep_enable: true,
     };
     let code = unsafe { esp_idf_svc::sys::esp_pm_configure((&config as *const _) as *const _) };
     esp_err("esp_pm_configure", code)?;
@@ -28,7 +31,65 @@ pub fn init_cpu_frequency_scaling() -> anyhow::Result<()> {
         config.max_freq_mhz,
         config.light_sleep_enable
     );
+    hold_light_sleep_lock()?;
     Ok(())
+}
+
+pub fn hold_light_sleep_lock() -> anyhow::Result<()> {
+    let handle = light_sleep_lock_handle()?;
+    if LIGHT_SLEEP_LOCK_HELD.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let code = unsafe { esp_idf_svc::sys::esp_pm_lock_acquire(handle) };
+    if code == esp_idf_svc::sys::ESP_OK as i32 {
+        log::info!("Light sleep lock acquired");
+        Ok(())
+    } else {
+        LIGHT_SLEEP_LOCK_HELD.store(false, Ordering::SeqCst);
+        Err(anyhow::anyhow!(
+            "esp_pm_lock_acquire(display) failed: esp_err_t={code}"
+        ))
+    }
+}
+
+pub fn release_light_sleep_lock() -> anyhow::Result<()> {
+    let handle = LIGHT_SLEEP_LOCK.load(Ordering::SeqCst);
+    if handle.is_null() || !LIGHT_SLEEP_LOCK_HELD.swap(false, Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let code = unsafe { esp_idf_svc::sys::esp_pm_lock_release(handle) };
+    if code == esp_idf_svc::sys::ESP_OK as i32 {
+        log::info!("Light sleep lock released");
+        Ok(())
+    } else {
+        LIGHT_SLEEP_LOCK_HELD.store(true, Ordering::SeqCst);
+        Err(anyhow::anyhow!(
+            "esp_pm_lock_release(display) failed: esp_err_t={code}"
+        ))
+    }
+}
+
+fn light_sleep_lock_handle() -> anyhow::Result<esp_idf_svc::sys::esp_pm_lock_handle_t> {
+    let existing = LIGHT_SLEEP_LOCK.load(Ordering::SeqCst);
+    if !existing.is_null() {
+        return Ok(existing);
+    }
+
+    let mut handle = std::ptr::null_mut();
+    let code = unsafe {
+        esp_idf_svc::sys::esp_pm_lock_create(
+            esp_idf_svc::sys::esp_pm_lock_type_t_ESP_PM_NO_LIGHT_SLEEP,
+            0,
+            b"display\0".as_ptr().cast(),
+            &mut handle,
+        )
+    };
+    esp_err("esp_pm_lock_create(display)", code)?;
+    LIGHT_SLEEP_LOCK.store(handle, Ordering::SeqCst);
+    log::info!("Light sleep lock created for display");
+    Ok(handle)
 }
 
 pub fn start_power_key_worker() {

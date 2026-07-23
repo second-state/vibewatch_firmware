@@ -19,7 +19,7 @@ const SESSION_LIST_IDLE_OFF_DELAY: std::time::Duration = std::time::Duration::fr
 const SESSION_LIST_LONG_PRESS_MENU_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 const SESSION_LIST_LONG_PRESS_CANCEL_VERTICAL_PX: i32 = 50;
 const SESSION_LIST_OFF_SHUTDOWN_PROMPT_DELAY: std::time::Duration =
-    std::time::Duration::from_secs(10 * 60);
+    std::time::Duration::from_secs(20 * 60);
 const IDLE_SHUTDOWN_COUNTDOWN_SECS: u64 = 15;
 const SCREEN_BACKSPACE_REPEAT_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 const SCREEN_SCROLL_SWIPE_ROWS: u16 = 15;
@@ -35,11 +35,17 @@ impl BacklightMode {
         if *self == mode {
             return Ok(());
         }
+        if mode == Self::Normal {
+            crate::power::hold_light_sleep_lock()?;
+        }
         let level = match mode {
             Self::Normal => BACKLIGHT_NORMAL,
             Self::Off => 0,
         };
         crate::lcd::set_backlight(level)?;
+        if mode == Self::Off {
+            crate::power::release_light_sleep_lock()?;
+        }
         *self = mode;
         Ok(())
     }
@@ -1008,7 +1014,7 @@ async fn open_session_picker(
                 off_since = Some(tokio::time::Instant::now());
             }
             _ = tokio::time::sleep_until(shutdown_prompt_at), if *backlight == BacklightMode::Off && off_since.is_some() && sessions_are_all_idle(&labels) => {
-                log::info!("Session list screen off for 10min with no working sessions; prompting shutdown");
+                log::info!("Session list screen off for 20min with no working sessions; prompting shutdown");
                 backlight.set(BacklightMode::Normal)?;
                 off_since = None;
                 last_list_change = tokio::time::Instant::now();
