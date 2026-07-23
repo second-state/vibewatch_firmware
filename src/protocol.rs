@@ -160,7 +160,6 @@ impl ClientMessage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_client_pty_input_json() {

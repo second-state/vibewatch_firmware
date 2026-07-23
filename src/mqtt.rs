@@ -166,7 +166,7 @@ impl MqttServer {
             password: password.as_deref(),
             buffer_size: 64 * 1024, // 收,需装下整张 screen
             out_buffer_size: 8 * 1024,
-            keep_alive_interval: Some(Duration::from_secs(20)),
+            keep_alive_interval: Some(Duration::from_secs(60)),
             reconnect_timeout: Some(Duration::from_secs(10)),
             network_timeout: Duration::from_secs(30),
             ..Default::default()
