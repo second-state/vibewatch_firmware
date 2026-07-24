@@ -11,6 +11,8 @@ extern "C" {
 static POWER_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static LIGHT_SLEEP_LOCK: AtomicPtr<esp_idf_svc::sys::esp_pm_lock> =
     AtomicPtr::new(std::ptr::null_mut());
+static APB_FREQ_LOCK: AtomicPtr<esp_idf_svc::sys::esp_pm_lock> =
+    AtomicPtr::new(std::ptr::null_mut());
 static LIGHT_SLEEP_LOCK_HELD: AtomicBool = AtomicBool::new(false);
 
 pub fn init() -> anyhow::Result<()> {
@@ -36,40 +38,64 @@ pub fn init_cpu_frequency_scaling() -> anyhow::Result<()> {
 }
 
 pub fn hold_light_sleep_lock() -> anyhow::Result<()> {
-    let handle = light_sleep_lock_handle()?;
     if LIGHT_SLEEP_LOCK_HELD.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
 
-    let code = unsafe { esp_idf_svc::sys::esp_pm_lock_acquire(handle) };
-    if code == esp_idf_svc::sys::ESP_OK as i32 {
-        log::info!("Light sleep lock acquired");
-        Ok(())
-    } else {
+    let sleep_handle = light_sleep_lock_handle()?;
+    let code = unsafe { esp_idf_svc::sys::esp_pm_lock_acquire(sleep_handle) };
+    if code != esp_idf_svc::sys::ESP_OK as i32 {
         LIGHT_SLEEP_LOCK_HELD.store(false, Ordering::SeqCst);
-        Err(anyhow::anyhow!(
+        return Err(anyhow::anyhow!(
             "esp_pm_lock_acquire(display) failed: esp_err_t={code}"
-        ))
+        ));
     }
+
+    let apb_handle = apb_freq_lock_handle()?;
+    let code = unsafe { esp_idf_svc::sys::esp_pm_lock_acquire(apb_handle) };
+    if code != esp_idf_svc::sys::ESP_OK as i32 {
+        let _ = unsafe { esp_idf_svc::sys::esp_pm_lock_release(sleep_handle) };
+        LIGHT_SLEEP_LOCK_HELD.store(false, Ordering::SeqCst);
+        return Err(anyhow::anyhow!(
+            "esp_pm_lock_acquire(display_apb) failed: esp_err_t={code}"
+        ));
+    }
+
+    log::info!("Display power locks acquired");
+    Ok(())
 }
 
 pub fn release_light_sleep_lock() -> anyhow::Result<()> {
-    let handle = LIGHT_SLEEP_LOCK.load(Ordering::SeqCst);
-    if handle.is_null() || !LIGHT_SLEEP_LOCK_HELD.swap(false, Ordering::SeqCst) {
+    if !LIGHT_SLEEP_LOCK_HELD.swap(false, Ordering::SeqCst) {
         return Ok(());
     }
 
-    let code = unsafe { esp_idf_svc::sys::esp_pm_lock_release(handle) };
-    if code == esp_idf_svc::sys::ESP_OK as i32 {
-        log::info!("Light sleep lock released");
-        dump_pm_locks_to_stdout();
-        Ok(())
-    } else {
-        LIGHT_SLEEP_LOCK_HELD.store(true, Ordering::SeqCst);
-        Err(anyhow::anyhow!(
-            "esp_pm_lock_release(display) failed: esp_err_t={code}"
-        ))
+    let mut first_err = None;
+
+    let apb_handle = APB_FREQ_LOCK.load(Ordering::SeqCst);
+    if !apb_handle.is_null() {
+        let code = unsafe { esp_idf_svc::sys::esp_pm_lock_release(apb_handle) };
+        if code != esp_idf_svc::sys::ESP_OK as i32 {
+            first_err = Some(("esp_pm_lock_release(display_apb)", code));
+        }
     }
+
+    let sleep_handle = LIGHT_SLEEP_LOCK.load(Ordering::SeqCst);
+    if !sleep_handle.is_null() {
+        let code = unsafe { esp_idf_svc::sys::esp_pm_lock_release(sleep_handle) };
+        if code != esp_idf_svc::sys::ESP_OK as i32 && first_err.is_none() {
+            first_err = Some(("esp_pm_lock_release(display)", code));
+        }
+    }
+
+    if let Some((context, code)) = first_err {
+        LIGHT_SLEEP_LOCK_HELD.store(true, Ordering::SeqCst);
+        return Err(anyhow::anyhow!("{context} failed: esp_err_t={code}"));
+    }
+
+    log::info!("Display power locks released");
+    dump_pm_locks_to_stdout();
+    Ok(())
 }
 
 fn light_sleep_lock_handle() -> anyhow::Result<esp_idf_svc::sys::esp_pm_lock_handle_t> {
@@ -89,7 +115,28 @@ fn light_sleep_lock_handle() -> anyhow::Result<esp_idf_svc::sys::esp_pm_lock_han
     };
     esp_err("esp_pm_lock_create(display)", code)?;
     LIGHT_SLEEP_LOCK.store(handle, Ordering::SeqCst);
-    log::info!("Light sleep lock created for display");
+    log::info!("Display light sleep lock created");
+    Ok(handle)
+}
+
+fn apb_freq_lock_handle() -> anyhow::Result<esp_idf_svc::sys::esp_pm_lock_handle_t> {
+    let existing = APB_FREQ_LOCK.load(Ordering::SeqCst);
+    if !existing.is_null() {
+        return Ok(existing);
+    }
+
+    let mut handle = std::ptr::null_mut();
+    let code = unsafe {
+        esp_idf_svc::sys::esp_pm_lock_create(
+            esp_idf_svc::sys::esp_pm_lock_type_t_ESP_PM_APB_FREQ_MAX,
+            0,
+            b"display_apb\0".as_ptr().cast(),
+            &mut handle,
+        )
+    };
+    esp_err("esp_pm_lock_create(display_apb)", code)?;
+    APB_FREQ_LOCK.store(handle, Ordering::SeqCst);
+    log::info!("Display APB max lock created");
     Ok(handle)
 }
 
