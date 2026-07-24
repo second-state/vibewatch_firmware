@@ -325,6 +325,7 @@ const MENU_FONT_H: u16 = 17;
 const MENU_FOOTER_H: i32 = 24;
 const MENU_ITEM_H: u16 = (DISPLAY_HEIGHT as u16 - MENU_START_Y - MENU_FOOTER_H as u16) / MENU_ROWS;
 pub const MENU_TITLE_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+const TERMINAL_APPEND_RENDER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
 
 fn build_version_label() -> &'static str {
     option_env!("VIBEKEYS_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
@@ -431,6 +432,7 @@ pub struct UI {
     display: Box<FastFramebuffer>,
     terminal_parser: Option<vt100::Parser>,
     terminal_renderer: Option<embedded_graphics_terminal::TerminalRenderer>,
+    terminal_last_render_us: i64,
     jpeg_screen: Option<crate::new_jpg::JpegBufferu16>,
 }
 
@@ -651,6 +653,7 @@ impl Default for UI {
             display,
             terminal_parser: None,
             terminal_renderer: None,
+            terminal_last_render_us: 0,
             jpeg_screen: None,
             state_area,
             text_area,
@@ -882,6 +885,21 @@ impl UI {
             parser.process(bytes);
         }
         let parse_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - parse_start_us;
+        let now_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+
+        if !full_frame
+            && self.terminal_last_render_us > 0
+            && std::time::Duration::from_micros((now_us - self.terminal_last_render_us) as u64)
+                < TERMINAL_APPEND_RENDER_TIMEOUT
+        {
+            log::debug!(
+                "screen_text append skipped render: bytes={} parse={:.2}ms since_render={:.2}ms",
+                bytes.len(),
+                parse_elapsed_us as f32 / 1000.0,
+                (now_us - self.terminal_last_render_us) as f32 / 1000.0
+            );
+            return Ok(());
+        }
 
         let mut renderer = self
             .terminal_renderer
@@ -910,6 +928,7 @@ impl UI {
             (false, Some(rect)) => self.flush_terminal_dirty(rect)?.unwrap_or(0),
             (_, None) => 0,
         };
+        self.terminal_last_render_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
         log::info!(
             "screen_text frame tag=0x{tag:02x} bytes={} parse={:.2}ms render={:.2}ms flush={:.2}ms cache_len={} dirty={:?}",
             bytes.len(),
