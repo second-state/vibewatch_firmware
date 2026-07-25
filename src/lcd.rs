@@ -1,15 +1,12 @@
 use esp_idf_svc::hal::interrupt::asynch::HalIsrNotification;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 static TOUCH_NOTIFY: HalIsrNotification = HalIsrNotification::new();
-static LCD_COLOR_TRANS_DONE_COUNT: AtomicU32 = AtomicU32::new(0);
+static LCD_COLOR_TRANS_DONE_NOTIFY: HalIsrNotification = HalIsrNotification::new();
 
 pub const LCD_WIDTH: u16 = 410;
 pub const LCD_HEIGHT: u16 = 502;
 pub const LCD_COLOR_BITS: u16 = 16;
 const FLUSH_CHUNK_ROWS: i32 = 64;
-const FLUSH_DONE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
-const FLUSH_DONE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TouchPoint {
@@ -123,7 +120,7 @@ unsafe extern "C" fn color_transfer_done_callback(
     _edata: *mut esp_idf_svc::sys::esp_lcd_panel_io_event_data_t,
     _user_ctx: *mut std::ffi::c_void,
 ) -> bool {
-    LCD_COLOR_TRANS_DONE_COUNT.fetch_add(1, Ordering::Relaxed);
+    LCD_COLOR_TRANS_DONE_NOTIFY.notify_lsb();
     false
 }
 
@@ -164,6 +161,18 @@ pub fn clear() {
 }
 
 pub fn flush_display(color_data: &[u8], x_start: i32, y_start: i32, x_end: i32, y_end: i32) -> i32 {
+    esp_idf_svc::hal::task::block_on(async_flush_display(
+        color_data, x_start, y_start, x_end, y_end,
+    ))
+}
+
+pub async fn async_flush_display(
+    color_data: &[u8],
+    x_start: i32,
+    y_start: i32,
+    x_end: i32,
+    y_end: i32,
+) -> i32 {
     let width = x_end.saturating_sub(x_start);
     let height = y_end.saturating_sub(y_start);
     if width <= 0 || height <= 0 {
@@ -183,8 +192,6 @@ pub fn flush_display(color_data: &[u8], x_start: i32, y_start: i32, x_end: i32, 
     }
 
     let panel = unsafe { esp_idf_svc::sys::board::get_panel_handle() };
-    let done_start = LCD_COLOR_TRANS_DONE_COUNT.load(Ordering::Relaxed);
-    let mut submitted_chunks = 0u32;
     let mut y = y_start;
     let mut offset = 0usize;
 
@@ -193,47 +200,36 @@ pub fn flush_display(color_data: &[u8], x_start: i32, y_start: i32, x_end: i32, 
         let len = row_bytes * rows as usize;
         let chunk = &color_data[offset..offset + len];
 
-        let e = unsafe {
-            esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
-                panel as _,
-                x_start,
-                y,
-                x_end,
-                y + rows,
-                chunk.as_ptr().cast(),
-            )
-        };
-        if e != 0 {
-            log::warn!("flush_display error: {}", e);
-            return e;
+        let mut last_error = 0;
+        for _ in 0..5 {
+            let e = unsafe {
+                esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
+                    panel as _,
+                    x_start,
+                    y,
+                    x_end,
+                    y + rows,
+                    chunk.as_ptr().cast(),
+                )
+            };
+            if e == 0 {
+                last_error = 0;
+                break;
+            }
+
+            last_error = e;
+            log::warn!("flush_display error: {}, waiting before retry", e);
+            LCD_COLOR_TRANS_DONE_NOTIFY.wait().await;
+        }
+        if last_error != 0 {
+            return last_error;
         }
 
-        submitted_chunks = submitted_chunks.saturating_add(1);
         y += rows;
         offset += len;
     }
 
-    if let Err(e) = wait_color_transfer_done(done_start, submitted_chunks) {
-        log::warn!("flush_display wait done error: {}", e);
-        return e;
-    }
-
     0
-}
-
-fn wait_color_transfer_done(start_count: u32, expected_delta: u32) -> Result<(), i32> {
-    let deadline = std::time::Instant::now() + FLUSH_DONE_TIMEOUT;
-    while LCD_COLOR_TRANS_DONE_COUNT
-        .load(Ordering::Relaxed)
-        .wrapping_sub(start_count)
-        < expected_delta
-    {
-        if std::time::Instant::now() >= deadline {
-            return Err(esp_idf_svc::sys::ESP_ERR_TIMEOUT as i32);
-        }
-        std::thread::sleep(FLUSH_DONE_POLL_INTERVAL);
-    }
-    Ok(())
 }
 
 fn esp_err(context: &str, code: i32) -> anyhow::Result<()> {

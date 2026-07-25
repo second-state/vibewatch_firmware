@@ -52,12 +52,27 @@ impl JpegBufferu16 {
     }
 
     /// 把整张图刷到 LCD (0, 0, width, height)。
+    #[allow(dead_code)]
     pub fn flush_to_lcd(&self) -> anyhow::Result<()> {
         let ptr = unsafe {
             std::slice::from_raw_parts(self.data.as_ptr() as *const u8, self.data.len() * 16)
         };
 
         let e = crate::lcd::flush_display(ptr, 0, 0, self.width as i32, self.height as i32);
+        if e != 0 {
+            Err(anyhow::anyhow!("Failed to flush to LCD: error code {}", e))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub async fn flush_to_lcd_async(&self) -> anyhow::Result<()> {
+        let ptr = unsafe {
+            std::slice::from_raw_parts(self.data.as_ptr() as *const u8, self.data.len() * 16)
+        };
+
+        let e =
+            crate::lcd::async_flush_display(ptr, 0, 0, self.width as i32, self.height as i32).await;
         if e != 0 {
             Err(anyhow::anyhow!("Failed to flush to LCD: error code {}", e))
         } else {

@@ -448,7 +448,7 @@ pub async fn main_menu(
         ("Setting".to_string(), false),
     ];
     let mut title = main_menu_title();
-    let item_rects = gui.display_menu_list(&title, &items)?;
+    let item_rects = gui.display_menu_list(&title, &items).await?;
     log::info!("{title}: waiting for touch selection");
 
     let mut press_index = None;
@@ -459,7 +459,7 @@ pub async fn main_menu(
                 next_title_refresh = tokio::time::Instant::now() + MENU_TITLE_REFRESH_DELAY;
                 let next_title = main_menu_title();
                 if next_title != title {
-                    gui.refresh_list_title(&next_title)?;
+                    gui.refresh_list_title(&next_title).await?;
                     title = next_title;
                 }
             }
@@ -545,7 +545,7 @@ pub async fn select_menu_item(
     title: &str,
     items: &[(String, bool)],
 ) -> anyhow::Result<usize> {
-    let item_rects = gui.display_menu_list(title, items)?;
+    let item_rects = gui.display_menu_list(title, items).await?;
     log::info!("{title}: waiting for touch selection");
 
     let mut press_index = None;
@@ -681,7 +681,7 @@ impl UI {
     }
 
     /// ASR text editor, adapted from vibekeys_firmware's black TUI-style editor.
-    pub fn show_asr_editor(&mut self, text: &str, hint: &str) -> anyhow::Result<()> {
+    pub async fn show_asr_editor(&mut self, text: &str, hint: &str) -> anyhow::Result<()> {
         let display = self.display.as_mut();
         display.clear(ColorFormat::CSS_BLACK)?;
         let record_color = match hint {
@@ -792,65 +792,62 @@ impl UI {
         )
         .draw(display)?;
 
-        for i in 0..5 {
-            let e = crate::lcd::flush_display(
-                self.display.data(),
-                0,
-                0,
-                DISPLAY_WIDTH as i32,
-                DISPLAY_HEIGHT as i32,
-            );
-            if e == 0 {
-                return Ok(());
-            }
-            log::warn!("flush asr editor error: {e} retry {i}");
+        let e = crate::lcd::async_flush_display(
+            self.display.data(),
+            0,
+            0,
+            DISPLAY_WIDTH as i32,
+            DISPLAY_HEIGHT as i32,
+        )
+        .await;
+        if e == 0 {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("flush asr editor failed: {e}"))
         }
-        Err(anyhow::anyhow!("flush asr editor failed"))
     }
 
-    fn flush_terminal_dirty(&self, rect: Rectangle) -> anyhow::Result<Option<i64>> {
+    async fn flush_terminal_dirty(&self, rect: Rectangle) -> anyhow::Result<Option<i64>> {
         let Some((data, rect)) = self.display.rect_data(rect) else {
             return Ok(None);
         };
 
         let flush_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
-        for i in 0..5 {
-            let e = crate::lcd::flush_display(
-                &data,
-                rect.top_left.x,
-                rect.top_left.y,
-                rect.top_left.x + rect.size.width as i32,
-                rect.top_left.y + rect.size.height as i32,
-            );
-            if e == 0 {
-                let flush_elapsed_us =
-                    unsafe { esp_idf_svc::sys::esp_timer_get_time() } - flush_start_us;
-                return Ok(Some(flush_elapsed_us));
-            }
-            log::warn!("flush terminal dirty rect error: {e} retry {i}");
+        let e = crate::lcd::async_flush_display(
+            &data,
+            rect.top_left.x,
+            rect.top_left.y,
+            rect.top_left.x + rect.size.width as i32,
+            rect.top_left.y + rect.size.height as i32,
+        )
+        .await;
+        if e == 0 {
+            let flush_elapsed_us =
+                unsafe { esp_idf_svc::sys::esp_timer_get_time() } - flush_start_us;
+            Ok(Some(flush_elapsed_us))
+        } else {
+            Err(anyhow::anyhow!("flush terminal dirty rect failed: {e}"))
         }
-        Err(anyhow::anyhow!("flush terminal dirty rect failed"))
     }
 
-    fn flush_terminal_full(&self) -> anyhow::Result<i64> {
+    async fn flush_terminal_full(&self) -> anyhow::Result<i64> {
         let flush_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
-        for i in 0..5 {
-            let e = crate::lcd::flush_display(
-                self.display.data(),
-                0,
-                0,
-                DISPLAY_WIDTH as i32,
-                DISPLAY_HEIGHT as i32,
-            );
-            if e == 0 {
-                return Ok(unsafe { esp_idf_svc::sys::esp_timer_get_time() } - flush_start_us);
-            }
-            log::warn!("flush terminal full frame error: {e} retry {i}");
+        let e = crate::lcd::async_flush_display(
+            self.display.data(),
+            0,
+            0,
+            DISPLAY_WIDTH as i32,
+            DISPLAY_HEIGHT as i32,
+        )
+        .await;
+        if e == 0 {
+            Ok(unsafe { esp_idf_svc::sys::esp_timer_get_time() } - flush_start_us)
+        } else {
+            Err(anyhow::anyhow!("flush terminal full frame failed: {e}"))
         }
-        Err(anyhow::anyhow!("flush terminal full frame failed"))
     }
 
-    pub fn show_terminal_text_frame(&mut self, payload: &[u8]) -> anyhow::Result<()> {
+    pub async fn show_terminal_text_frame(&mut self, payload: &[u8]) -> anyhow::Result<()> {
         let Some((&tag, bytes)) = payload.split_first() else {
             log::warn!("empty screen_text frame");
             return Ok(());
@@ -924,8 +921,8 @@ impl UI {
         self.terminal_renderer = Some(renderer);
 
         let flush_elapsed_us = match (full_frame, dirty) {
-            (true, Some(_)) => self.flush_terminal_full()?,
-            (false, Some(rect)) => self.flush_terminal_dirty(rect)?.unwrap_or(0),
+            (true, Some(_)) => self.flush_terminal_full().await?,
+            (false, Some(rect)) => self.flush_terminal_dirty(rect).await?.unwrap_or(0),
             (_, None) => 0,
         };
         self.terminal_last_render_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
@@ -941,7 +938,10 @@ impl UI {
         Ok(())
     }
 
-    pub fn scroll_terminal_text(&mut self, direction: TerminalScroll) -> anyhow::Result<bool> {
+    pub async fn scroll_terminal_text(
+        &mut self,
+        direction: TerminalScroll,
+    ) -> anyhow::Result<bool> {
         let Some(parser) = self.terminal_parser.as_mut() else {
             return Ok(false);
         };
@@ -965,12 +965,12 @@ impl UI {
         log::info!("local text scroll cache_len={}", renderer.cache_len());
         self.terminal_renderer = Some(renderer);
         if let Some(rect) = dirty {
-            let _ = self.flush_terminal_dirty(rect)?;
+            let _ = self.flush_terminal_dirty(rect).await?;
         }
         Ok(true)
     }
 
-    pub fn redraw_cached_terminal_text(&mut self) -> anyhow::Result<bool> {
+    pub async fn redraw_cached_terminal_text(&mut self) -> anyhow::Result<bool> {
         let Some(parser) = self.terminal_parser.as_ref() else {
             return Ok(false);
         };
@@ -987,7 +987,7 @@ impl UI {
         let cache_len = renderer.cache_len();
         self.terminal_renderer = Some(renderer);
 
-        let flush_elapsed_us = self.flush_terminal_full()?;
+        let flush_elapsed_us = self.flush_terminal_full().await?;
         log::info!(
             "redraw cached terminal text render={:.2}ms flush={:.2}ms cache_len={}",
             render_elapsed_us as f32 / 1000.0,
@@ -997,24 +997,24 @@ impl UI {
         Ok(true)
     }
 
-    pub fn show_jpeg_screen(
+    pub async fn show_jpeg_screen(
         &mut self,
         screen: crate::new_jpg::JpegBufferu16,
     ) -> anyhow::Result<()> {
-        screen.flush_to_lcd()?;
+        screen.flush_to_lcd_async().await?;
         self.jpeg_screen = Some(screen);
         Ok(())
     }
 
-    pub fn redraw_cached_jpeg_screen(&self) -> anyhow::Result<bool> {
+    pub async fn redraw_cached_jpeg_screen(&self) -> anyhow::Result<bool> {
         let Some(screen) = self.jpeg_screen.as_ref() else {
             return Ok(false);
         };
-        screen.flush_to_lcd()?;
+        screen.flush_to_lcd_async().await?;
         Ok(true)
     }
 
-    pub fn show_session_backspace_overlay(&mut self) -> anyhow::Result<()> {
+    pub async fn show_session_backspace_overlay(&mut self) -> anyhow::Result<()> {
         let (rect, box_rect) = self.draw_session_top_overlay_box(0)?;
         let icon_style = PrimitiveStyleBuilder::new()
             .stroke_color(ColorFormat::CSS_WHEAT)
@@ -1038,11 +1038,11 @@ impl UI {
             line.into_styled(icon_style).draw(self.display.as_mut())?;
         }
 
-        let _ = self.flush_terminal_dirty(rect)?;
+        let _ = self.flush_terminal_dirty(rect).await?;
         Ok(())
     }
 
-    pub fn show_session_menu_overlay(&mut self) -> anyhow::Result<()> {
+    pub async fn show_session_menu_overlay(&mut self) -> anyhow::Result<()> {
         let (rect, box_rect) = self.draw_session_top_overlay_box(2)?;
         let icon_style = PrimitiveStyleBuilder::new()
             .stroke_color(ColorFormat::CSS_WHEAT)
@@ -1057,7 +1057,7 @@ impl UI {
                 .draw(self.display.as_mut())?;
         }
 
-        let _ = self.flush_terminal_dirty(rect)?;
+        let _ = self.flush_terminal_dirty(rect).await?;
         Ok(())
     }
 
@@ -1158,13 +1158,11 @@ impl UI {
     }
 
     /// Render generic list items. Each item owns its geometry and optional colors.
-    pub fn display_list(
+    pub async fn display_list(
         &mut self,
         title: &str,
         items: &[ListItem],
     ) -> anyhow::Result<Vec<Rectangle>> {
-        crate::lcd::clear();
-
         let display = self.display.as_mut();
         display.clear(ColorFormat::CSS_BLACK)?;
 
@@ -1229,24 +1227,23 @@ impl UI {
             items.len(),
             item_rects.len()
         );
-        for i in 0..5 {
-            let e = crate::lcd::flush_display(
-                self.display.data(),
-                0,
-                0,
-                DISPLAY_WIDTH as i32,
-                DISPLAY_HEIGHT as i32,
-            );
-            if e == 0 {
-                log::info!("display_list flush ok");
-                return Ok(item_rects);
-            }
-            log::warn!("flush list error: {e} retry {i}");
+        let e = crate::lcd::async_flush_display(
+            self.display.data(),
+            0,
+            0,
+            DISPLAY_WIDTH as i32,
+            DISPLAY_HEIGHT as i32,
+        )
+        .await;
+        if e == 0 {
+            log::info!("display_list flush ok");
+            Ok(item_rects)
+        } else {
+            Err(anyhow::anyhow!("flush list failed: {e}"))
         }
-        Err(anyhow::anyhow!("flush list failed"))
     }
 
-    pub fn refresh_list_title(&mut self, title: &str) -> anyhow::Result<()> {
+    pub async fn refresh_list_title(&mut self, title: &str) -> anyhow::Result<()> {
         let title_rect = Rectangle::new(
             Point::zero(),
             Size::new(DISPLAY_WIDTH as u32, MENU_START_Y as u32),
@@ -1273,24 +1270,23 @@ impl UI {
         let Some((data, rect)) = self.display.rect_data(title_rect) else {
             return Ok(());
         };
-        for i in 0..5 {
-            let e = crate::lcd::flush_display(
-                &data,
-                rect.top_left.x,
-                rect.top_left.y,
-                rect.top_left.x + rect.size.width as i32,
-                rect.top_left.y + rect.size.height as i32,
-            );
-            if e == 0 {
-                return Ok(());
-            }
-            log::warn!("flush list title error: {e} retry {i}");
+        let e = crate::lcd::async_flush_display(
+            &data,
+            rect.top_left.x,
+            rect.top_left.y,
+            rect.top_left.x + rect.size.width as i32,
+            rect.top_left.y + rect.size.height as i32,
+        )
+        .await;
+        if e == 0 {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("flush list title failed: {e}"))
         }
-        Err(anyhow::anyhow!("flush list title failed"))
     }
 
     /// Compatibility helper for the existing menu/session list layout.
-    pub fn display_menu_list(
+    pub async fn display_menu_list(
         &mut self,
         title: &str,
         items: &[(String, bool)],
@@ -1314,6 +1310,6 @@ impl UI {
             })
             .collect();
 
-        self.display_list(title, &list_items)
+        self.display_list(title, &list_items).await
     }
 }
