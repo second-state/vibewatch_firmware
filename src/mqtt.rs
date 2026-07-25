@@ -125,6 +125,13 @@ impl ScreenFormat {
             Self::High | Self::Medium | Self::Low => "screen",
         }
     }
+
+    fn screen_qos(self) -> QoS {
+        match self {
+            Self::Text => QoS::AtLeastOnce,
+            Self::High | Self::Medium | Self::Low => QoS::AtMostOnce,
+        }
+    }
 }
 
 /// session 列表单行字符上限。取 15:最坏全角中文 15×12px=180px,默认屏(284)/max2(320)都单行不溢出。
@@ -238,11 +245,17 @@ impl MqttServer {
     /// 把 `active` 落实为 screen 订阅。回调式客户端下 subscribe/unsubscribe 是同步调用,
     /// 不再需要像旧 async 客户端那样并发排水 conn 事件。
     pub async fn flush_pending(&mut self) -> anyhow::Result<()> {
-        let next_topic = self.active.as_ref().and_then(|prefix| {
-            self.sessions
-                .get(prefix)
-                .map(|s| format!("{prefix}/{}", s.format.screen_suffix()))
+        let next_subscription = self.active.as_ref().and_then(|prefix| {
+            self.sessions.get(prefix).map(|s| {
+                (
+                    format!("{prefix}/{}", s.format.screen_suffix()),
+                    s.format.screen_qos(),
+                )
+            })
         });
+        let next_topic = next_subscription
+            .as_ref()
+            .map(|(topic, _)| topic.to_string());
         if next_topic == self.subscribed_screen_topic {
             return Ok(());
         }
@@ -255,10 +268,10 @@ impl MqttServer {
         }
 
         // 再订阅新活跃会话的 screen/screen_text
-        if let Some(new_topic) = next_topic {
-            log::info!("Subscribing session screen topic: {new_topic}");
+        if let Some((new_topic, qos)) = next_subscription {
+            log::info!("Subscribing session screen topic: {new_topic} qos={qos:?}");
             self.client
-                .subscribe(&new_topic, QoS::AtMostOnce)
+                .subscribe(&new_topic, qos)
                 .map_err(|e| anyhow::anyhow!("subscribe screen failed: {e:?}"))?;
             self.subscribed_screen_topic = Some(new_topic);
         }
