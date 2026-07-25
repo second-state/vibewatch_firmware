@@ -17,7 +17,7 @@ use crate::{
 const BACKLIGHT_NORMAL: u8 = 50;
 const SESSION_LIST_IDLE_OFF_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 const SESSION_LIST_LONG_PRESS_MENU_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
-const SESSION_LIST_LONG_PRESS_CANCEL_VERTICAL_PX: i32 = 50;
+const TOUCH_SWIPE_THRESHOLD_PX: i32 = 40;
 const SESSION_LIST_OFF_SHUTDOWN_PROMPT_DELAY: std::time::Duration =
     std::time::Duration::from_secs(20 * 60);
 const IDLE_SHUTDOWN_COUNTDOWN_SECS: u64 = 15;
@@ -988,16 +988,13 @@ fn top_asr_action(touch: lcd::TouchPoint) -> Option<TopAsrAction> {
 }
 
 fn asr_editor_swipe(start: lcd::TouchPoint, end: lcd::TouchPoint) -> Option<AsrEditorSwipe> {
-    const MIN_VERTICAL_SWIPE_PX: i32 = 80;
-    const MAX_HORIZONTAL_DRIFT_PX: i32 = 100;
-
     if is_asr_touch(start) || top_asr_action(start).is_some() {
         return None;
     }
 
     let dx = (end.x as i32 - start.x as i32).abs();
     let dy = end.y as i32 - start.y as i32;
-    if dx > MAX_HORIZONTAL_DRIFT_PX || dy.abs() < MIN_VERTICAL_SWIPE_PX {
+    if dx > TOUCH_SWIPE_THRESHOLD_PX || dy.abs() < TOUCH_SWIPE_THRESHOLD_PX {
         return None;
     }
     if dy < 0 {
@@ -1012,12 +1009,9 @@ fn is_asr_touch(touch: lcd::TouchPoint) -> bool {
 }
 
 fn is_back_swipe(start: lcd::TouchPoint, end: lcd::TouchPoint) -> bool {
-    const MIN_RIGHT_SWIPE_PX: i32 = 80;
-    const MAX_VERTICAL_DRIFT_PX: i32 = 80;
-
     let dx = end.x as i32 - start.x as i32;
     let dy = (end.y as i32 - start.y as i32).abs();
-    dx >= MIN_RIGHT_SWIPE_PX && dy <= MAX_VERTICAL_DRIFT_PX
+    dx >= TOUCH_SWIPE_THRESHOLD_PX && dy <= TOUCH_SWIPE_THRESHOLD_PX
 }
 
 fn is_screen_menu_touch(start: lcd::TouchPoint, end: lcd::TouchPoint) -> bool {
@@ -1036,12 +1030,9 @@ fn scroll_swipe_message(
     start: lcd::TouchPoint,
     end: lcd::TouchPoint,
 ) -> Option<protocol::ClientMessage> {
-    const MIN_VERTICAL_SWIPE_PX: i32 = 80;
-    const MAX_HORIZONTAL_DRIFT_PX: i32 = 80;
-
     let dx = (end.x as i32 - start.x as i32).abs();
     let dy = end.y as i32 - start.y as i32;
-    if dx > MAX_HORIZONTAL_DRIFT_PX || dy.abs() < MIN_VERTICAL_SWIPE_PX {
+    if dx > TOUCH_SWIPE_THRESHOLD_PX || dy.abs() < TOUCH_SWIPE_THRESHOLD_PX {
         return None;
     }
 
@@ -1326,10 +1317,13 @@ async fn open_session_picker(
                             press_touch = Some(touch);
                             press_started_at = Some(tokio::time::Instant::now());
                         } else if let Some(start) = press_touch {
+                            let dx = touch.x as i32 - start.x as i32;
                             let dy = touch.y as i32 - start.y as i32;
-                            if dy.abs() > SESSION_LIST_LONG_PRESS_CANCEL_VERTICAL_PX {
+                            if dx.abs() > TOUCH_SWIPE_THRESHOLD_PX
+                                || dy.abs() > TOUCH_SWIPE_THRESHOLD_PX
+                            {
                                 log::debug!(
-                                    "Session list long press cancelled by vertical movement: dy={dy}"
+                                    "Session list long press cancelled by movement: dx={dx} dy={dy}"
                                 );
                                 press_started_at = None;
                             }
@@ -1340,6 +1334,24 @@ async fn open_session_picker(
                         let Some(start) = press_touch.take() else {
                             continue;
                         };
+                        if is_back_swipe(start, touch) {
+                            log::info!("Session list right swipe detected, refreshing");
+                            last_list_change = tokio::time::Instant::now();
+                            next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
+                            scroll_offset = clamp_session_scroll_offset(
+                                server,
+                                scroll_offset,
+                                item_rects.len().max(1),
+                            );
+                            last_session_title = render_session_picker(
+                                server,
+                                gui,
+                                &mut labels,
+                                &mut item_rects,
+                                scroll_offset,
+                            ).await;
+                            continue;
+                        }
                         if let Some(delta) = list_scroll_delta(start, touch) {
                             let visible_count = item_rects.len().max(1);
                             let max_offset = labels.len().saturating_sub(visible_count);
@@ -1467,12 +1479,9 @@ fn clamp_session_scroll_offset(
 }
 
 fn list_scroll_delta(start: lcd::TouchPoint, end: lcd::TouchPoint) -> Option<isize> {
-    const MIN_VERTICAL_SWIPE_PX: i32 = 80;
-    const MAX_HORIZONTAL_DRIFT_PX: i32 = 80;
-
     let dx = (end.x as i32 - start.x as i32).abs();
     let dy = end.y as i32 - start.y as i32;
-    if dx > MAX_HORIZONTAL_DRIFT_PX || dy.abs() < MIN_VERTICAL_SWIPE_PX {
+    if dx > TOUCH_SWIPE_THRESHOLD_PX || dy.abs() < TOUCH_SWIPE_THRESHOLD_PX {
         return None;
     }
 
