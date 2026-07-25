@@ -7,6 +7,7 @@ pub const LCD_WIDTH: u16 = 410;
 pub const LCD_HEIGHT: u16 = 502;
 pub const LCD_COLOR_BITS: u16 = 16;
 const FLUSH_CHUNK_ROWS: i32 = 64;
+const FLUSH_RETRY_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TouchPoint {
@@ -143,6 +144,13 @@ fn register_color_transfer_done_callback() -> anyhow::Result<()> {
     })
 }
 
+async fn wait_color_transfer_done_or_timeout() {
+    tokio::select! {
+        _ = LCD_COLOR_TRANS_DONE_NOTIFY.wait() => {}
+        _ = tokio::time::sleep(FLUSH_RETRY_WAIT) => {}
+    }
+}
+
 pub fn clear() {
     let byte_per_pixel = LCD_COLOR_BITS / 8;
     let mut color = vec![0_u8; LCD_HEIGHT as usize * LCD_WIDTH as usize * byte_per_pixel as usize];
@@ -219,7 +227,7 @@ pub async fn async_flush_display(
 
             last_error = e;
             log::warn!("flush_display error: {}, waiting before retry", e);
-            LCD_COLOR_TRANS_DONE_NOTIFY.wait().await;
+            wait_color_transfer_done_or_timeout().await;
         }
         if last_error != 0 {
             return last_error;

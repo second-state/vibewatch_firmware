@@ -1106,6 +1106,42 @@ impl UI {
         Ok(true)
     }
 
+    pub async fn show_loading_modal(&mut self) -> anyhow::Result<()> {
+        let modal_w = (DISPLAY_WIDTH as u32).saturating_sub(80).min(240);
+        let modal_h = 88u32;
+        let modal_rect = Rectangle::new(
+            Point::new(
+                ((DISPLAY_WIDTH as u32).saturating_sub(modal_w) / 2) as i32,
+                ((DISPLAY_HEIGHT as u32).saturating_sub(modal_h) / 2) as i32,
+            ),
+            Size::new(modal_w, modal_h),
+        );
+        let display = self.display.as_mut();
+        modal_rect
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .stroke_color(ColorFormat::CSS_WHEAT)
+                    .stroke_width(4)
+                    .fill_color(ColorFormat::CSS_BLACK)
+                    .build(),
+            )
+            .draw(display)?;
+        Text::with_alignment(
+            "Loading...",
+            modal_rect.center() + Point::new(0, 6),
+            shifted_text_style(
+                u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
+                ColorFormat::CSS_LIGHT_CYAN,
+                3,
+            ),
+            Alignment::Center,
+        )
+        .draw(display)?;
+
+        let _ = self.flush_terminal_dirty(modal_rect).await?;
+        Ok(())
+    }
+
     pub async fn show_session_backspace_overlay(&mut self) -> anyhow::Result<()> {
         let (rect, box_rect) = self.draw_session_top_overlay_box(0)?;
         let icon_style = PrimitiveStyleBuilder::new()

@@ -1382,7 +1382,9 @@ async fn open_session_picker(
                             if let Some((prefix, ..)) = labels.get(index) {
                                 let prefix = prefix.clone();
                                 backlight.set(BacklightMode::Normal)?;
+                                gui.show_loading_modal().await?;
                                 server.set_active(&prefix);
+                                server.flush_pending().await?;
                                 send_active_sync(server, false).await?;
                                 return Ok(());
                             }
