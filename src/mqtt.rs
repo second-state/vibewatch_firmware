@@ -77,6 +77,7 @@ pub enum MqttEvent {
         prefix: String,
         online: bool,
         list_changed: bool,
+        was_active: bool,
     },
 }
 
@@ -286,13 +287,16 @@ impl MqttServer {
                     // LWT:实例下线(空 payload = 删除 retained)
                     log::info!("Session offline (LWT): {topic}");
                     let list_changed = self.sessions.remove(&topic).is_some();
-                    if self.active.as_deref() == Some(topic.as_str()) {
+                    let was_active = self.active.as_deref() == Some(topic.as_str());
+                    if was_active {
+                        log::warn!("Active session went offline: {topic}");
                         self.active = None; // flush_pending 会退订 screen
                     }
                     return Some(MqttEvent::Presence {
                         prefix: topic,
                         online: false,
                         list_changed,
+                        was_active,
                     });
                 } else {
                     match serde_json::from_slice::<Presence>(&data) {
@@ -323,6 +327,7 @@ impl MqttServer {
                                 prefix: p.prefix,
                                 online: true,
                                 list_changed,
+                                was_active: false,
                             });
                         }
                         Err(e) => log::warn!("Bad presence JSON: {e}"),
@@ -396,10 +401,10 @@ impl MqttServer {
     /// 走 `{P}/control` 的 JSON(serde 邻接标签 `{"type":..,"data":..}` 已与服务端对齐)。
     /// 目标 = 用户选定的活跃会话(与 screen 订阅是否已落实无关)。
     pub async fn send(&mut self, msg: ClientMessage) -> anyhow::Result<()> {
-        let prefix = self
-            .active
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No active vibetty session"))?;
+        let Some(prefix) = self.active.clone() else {
+            log::error!("Cannot send {msg:?}: no active vibetty session");
+            return Err(anyhow::anyhow!("No active vibetty session"));
+        };
 
         match msg {
             ClientMessage::PtyInput(bytes) => {
@@ -474,6 +479,10 @@ impl MqttServer {
 
     pub fn clear_active(&mut self) {
         self.active = None;
+    }
+
+    pub fn has_active_session(&self) -> bool {
+        self.active.is_some()
     }
 
     pub fn active_uses_text_screen(&self) -> bool {

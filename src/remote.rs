@@ -113,7 +113,26 @@ pub async fn run(
                     None => std::future::pending::<()>().await,
                 }
             }, if backspace_touch_active => {
-                send_backspace_key(&mut server).await?;
+                if let Err(e) = send_backspace_key(&mut server).await {
+                    log::warn!("Ignoring backspace repeat after active session disappeared: {e:?}");
+                    backspace_touch_active = false;
+                    backspace_repeat_sent = false;
+                    next_backspace_at = None;
+                    screen_menu_touch_active = false;
+                    swipe_start = None;
+                    open_session_picker(
+                        &mut server,
+                        gui,
+                        &mut touch_rx,
+                        &mut boot_button,
+                        &mut backlight,
+                        audio_prompt,
+                        &mut audio_prompt_enabled,
+                        nvs,
+                    )
+                    .await?;
+                    continue;
+                }
                 backspace_repeat_sent = true;
                 next_backspace_at = Some(tokio::time::Instant::now() + SCREEN_BACKSPACE_REPEAT_DELAY);
             }
@@ -145,7 +164,9 @@ pub async fn run(
                             backspace_touch_active = false;
                             next_backspace_at = None;
                             if !backspace_repeat_sent {
-                                send_backspace_key(&mut server).await?;
+                                if let Err(e) = send_backspace_key(&mut server).await {
+                                    log::warn!("Ignoring backspace release after active session disappeared: {e:?}");
+                                }
                             }
                             redraw_active_cached_screen(&server, gui).await?;
                             continue;
@@ -196,7 +217,21 @@ pub async fn run(
                                     }
                                 }
                                 log::info!("Vertical swipe detected, sending {msg:?}");
-                                server.send(msg).await?;
+                                if let Err(e) = server.send(msg).await {
+                                    log::warn!("Ignoring vertical swipe send after active session disappeared: {e:?}");
+                                    open_session_picker(
+                                        &mut server,
+                                        gui,
+                                        &mut touch_rx,
+                                        &mut boot_button,
+                                        &mut backlight,
+                                        audio_prompt,
+                                        &mut audio_prompt_enabled,
+                                        nvs,
+                                    )
+                                    .await?;
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -212,7 +247,36 @@ pub async fn run(
                     log::warn!("MQTT event source closed, exiting remote loop");
                     break;
                 };
+                let active_session_went_offline = matches!(
+                    &ev,
+                    MqttEvent::Presence {
+                        online: false,
+                        was_active: true,
+                        ..
+                    }
+                );
                 handle_mqtt_event(ev, gui, &mut backlight).await?;
+                if active_session_went_offline {
+                    log::warn!("Returning to session list after active session offline");
+                    swipe_start = None;
+                    backspace_touch_active = false;
+                    backspace_repeat_sent = false;
+                    next_backspace_at = None;
+                    screen_menu_touch_active = false;
+                    server.flush_pending().await?;
+                    open_session_picker(
+                        &mut server,
+                        gui,
+                        &mut touch_rx,
+                        &mut boot_button,
+                        &mut backlight,
+                        audio_prompt,
+                        &mut audio_prompt_enabled,
+                        nvs,
+                    )
+                    .await?;
+                    continue;
+                }
                 if backspace_touch_active {
                     gui.show_session_backspace_overlay().await?;
                 } else if screen_menu_touch_active {
@@ -263,8 +327,16 @@ async fn handle_mqtt_event(
             prefix,
             online,
             list_changed,
+            was_active,
         } => {
-            log::info!("Presence: {prefix} online={online}");
+            log::info!(
+                "Presence: {prefix} online={online} list_changed={list_changed} was_active={was_active}"
+            );
+            if !online && was_active {
+                log::warn!(
+                    "Active session offline; input sends will fail until a new session is selected"
+                );
+            }
             if list_changed {
                 backlight.set(BacklightMode::Normal)?;
             }
@@ -275,6 +347,11 @@ async fn handle_mqtt_event(
 }
 
 async fn send_active_sync(server: &mut MqttServer, close: bool) -> anyhow::Result<()> {
+    if !server.has_active_session() {
+        log::warn!("Skipping active sync: no active session");
+        return Ok(());
+    }
+
     let msg = if server.active_uses_text_screen() {
         let (cols, rows) = crate::ui::terminal_text_cells();
         log::info!("Sending text-mode sync: cols={cols} rows={rows} close={close}");
@@ -379,32 +456,36 @@ async fn show_screen_action_menu(
         3 => ScreenAction::Enter,
         _ => return Ok(()),
     };
-    match action {
+    let send_result = match action {
         ScreenAction::Esc => {
             server
                 .send(protocol::ClientMessage::pty_input_str("\x1b"))
-                .await?
+                .await
         }
         ScreenAction::Next => {
             server
                 .send(protocol::ClientMessage::pty_input_str("\x1b[B"))
-                .await?
+                .await
         }
         ScreenAction::Yolo => {
             server
                 .send(protocol::ClientMessage::pty_input_str("\x1b[Z"))
-                .await?
+                .await
         }
         ScreenAction::Enter => {
             server
                 .send(protocol::ClientMessage::pty_input_str("\r"))
-                .await?
+                .await
         }
+    };
+    if let Err(e) = send_result {
+        log::warn!("Ignoring screen menu action after active session disappeared: {e:?}");
+        return Ok(());
     }
     if server.active_uses_text_screen() {
         redraw_active_cached_screen(server, gui).await?;
-    } else {
-        send_active_sync(server, false).await?;
+    } else if let Err(e) = send_active_sync(server, false).await {
+        log::warn!("Ignoring screen menu sync after active session disappeared: {e:?}");
     }
     Ok(())
 }
@@ -573,7 +654,14 @@ async fn run_touch_asr(
                                 let text = editor.take_trimmed();
                                 if !text.is_empty() {
                                     let text_mode = server.active_uses_text_screen();
-                                    server.send(protocol::ClientMessage::Input(text)).await?;
+                                    if let Err(e) =
+                                        server.send(protocol::ClientMessage::Input(text)).await
+                                    {
+                                        log::warn!(
+                                            "Ignoring ASR editor send after active session disappeared: {e:?}"
+                                        );
+                                        return Ok(());
+                                    }
                                     if text_mode {
                                         if let Err(e) = gui.redraw_cached_terminal_text().await {
                                             log::warn!("redraw cached terminal text failed: {e:?}");
