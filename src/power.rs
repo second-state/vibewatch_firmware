@@ -8,6 +8,14 @@ static APB_FREQ_LOCK: AtomicPtr<esp_idf_svc::sys::esp_pm_lock> =
     AtomicPtr::new(std::ptr::null_mut());
 static LIGHT_SLEEP_LOCK_HELD: AtomicBool = AtomicBool::new(false);
 
+const AXP2101_STATUS1_VBUS_GOOD: u8 = 1 << 5;
+
+#[derive(Clone, Copy, Debug)]
+pub struct PmuStatus {
+    pub status1: u8,
+    pub status2: u8,
+}
+
 pub fn init() -> anyhow::Result<()> {
     esp_err("board_pmu_init", unsafe {
         esp_idf_svc::sys::board::board_pmu_init()
@@ -61,6 +69,21 @@ pub fn hold_light_sleep_lock() -> anyhow::Result<()> {
 }
 
 pub fn release_light_sleep_lock() -> anyhow::Result<()> {
+    if LIGHT_SLEEP_LOCK_HELD.load(Ordering::SeqCst) {
+        match pmu_status() {
+            Some(status) if status.status1 & AXP2101_STATUS1_VBUS_GOOD != 0 => {
+                log::info!(
+                    "External power connected; keeping display power locks acquired (status1=0x{:02x}, status2=0x{:02x})",
+                    status.status1,
+                    status.status2
+                );
+                return Ok(());
+            }
+            Some(_) => {}
+            None => log::warn!("PMU status unavailable; releasing display power locks anyway"),
+        }
+    }
+
     if !LIGHT_SLEEP_LOCK_HELD.swap(false, Ordering::SeqCst) {
         return Ok(());
     }
@@ -191,6 +214,24 @@ pub fn battery_percent() -> Option<u8> {
     } else {
         None
     }
+}
+
+pub fn pmu_status() -> Option<PmuStatus> {
+    let status1 = unsafe { esp_idf_svc::sys::board::board_pmu_status1() };
+    let status2 = unsafe { esp_idf_svc::sys::board::board_pmu_status2() };
+    if (0..=u8::MAX as i32).contains(&status1) && (0..=u8::MAX as i32).contains(&status2) {
+        Some(PmuStatus {
+            status1: status1 as u8,
+            status2: status2 as u8,
+        })
+    } else {
+        None
+    }
+}
+
+#[allow(dead_code)]
+pub fn external_power_connected() -> Option<bool> {
+    pmu_status().map(|status| status.status1 & AXP2101_STATUS1_VBUS_GOOD != 0)
 }
 
 fn esp_err(context: &str, code: i32) -> anyhow::Result<()> {

@@ -21,6 +21,8 @@ int board_pmu_init(void);
 bool board_pmu_take_pkey_long_press(void);
 int board_pmu_shutdown(void);
 int board_pmu_battery_percent(void);
+int board_pmu_status1(void);
+int board_pmu_status2(void);
 int board_audio_init(void);
 int board_audio_close(void);
 int board_audio_read_mic(void *data, int len);
