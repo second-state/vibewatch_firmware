@@ -9,25 +9,15 @@ pub const SAMPLE_RATE: u32 = 16000;
 pub const PROMPT_PCM_KEY: &str = "audio_pcm";
 const PROMPT_ENABLED_KEY: &str = "audio_prompt_on";
 
-extern "C" {
-    fn board_audio_init() -> std::ffi::c_int;
-    fn board_audio_close() -> std::ffi::c_int;
-    fn board_audio_read_mic(data: *mut std::ffi::c_void, len: std::ffi::c_int) -> std::ffi::c_int;
-    fn board_audio_write_speaker(
-        data: *const std::ffi::c_void,
-        len: std::ffi::c_int,
-    ) -> std::ffi::c_int;
-}
-
 pub fn init() -> anyhow::Result<()> {
     log::info!("audio init");
-    let code = unsafe { board_audio_init() };
+    let code = unsafe { esp_idf_svc::sys::board::board_audio_init() };
     esp_result("board_audio_init", code)
 }
 
 pub fn close() -> anyhow::Result<()> {
     log::info!("audio close");
-    let code = unsafe { board_audio_close() };
+    let code = unsafe { esp_idf_svc::sys::board::board_audio_close() };
     esp_result("board_audio_close", code)
 }
 
@@ -44,8 +34,12 @@ pub fn read_mic_i16(samples: &mut [i16]) -> anyhow::Result<usize> {
         anyhow::bail!("mic buffer length exceeds C int range");
     }
 
-    let read =
-        unsafe { board_audio_read_mic(samples.as_mut_ptr().cast(), byte_len as std::ffi::c_int) };
+    let read = unsafe {
+        esp_idf_svc::sys::board::board_audio_read_mic(
+            samples.as_mut_ptr().cast(),
+            byte_len as std::ffi::c_int,
+        )
+    };
     if read < 0 {
         esp_result("board_audio_read_mic", read)?;
         unreachable!();
@@ -62,8 +56,12 @@ pub fn write_speaker_bytes(bytes: &[u8]) -> anyhow::Result<usize> {
         anyhow::bail!("speaker buffer length exceeds C int range");
     }
 
-    let written =
-        unsafe { board_audio_write_speaker(bytes.as_ptr().cast(), bytes.len() as std::ffi::c_int) };
+    let written = unsafe {
+        esp_idf_svc::sys::board::board_audio_write_speaker(
+            bytes.as_ptr().cast(),
+            bytes.len() as std::ffi::c_int,
+        )
+    };
     if written < 0 {
         esp_result("board_audio_write_speaker", written)?;
         unreachable!();
@@ -275,8 +273,13 @@ impl Driver {
         mut on_start_listen: impl FnMut(),
         mut is_stop: impl FnMut() -> bool,
     ) -> anyhow::Result<String> {
+        #[inline]
+        unsafe extern "C" fn wrap_esp_crt_bundle_attach(conf: *mut ::core::ffi::c_void) -> i32 {
+            esp_idf_svc::sys::esp_crt_bundle_attach(conf)
+        }
+
         let config = esp_idf_svc::http::client::Configuration {
-            crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
+            crt_bundle_attach: Some(wrap_esp_crt_bundle_attach),
             ..Default::default()
         };
         let conn = esp_idf_svc::http::client::EspHttpConnection::new(&config)?;

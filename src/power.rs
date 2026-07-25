@@ -1,13 +1,6 @@
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::time::Duration;
 
-extern "C" {
-    fn board_pmu_init() -> std::ffi::c_int;
-    fn board_pmu_take_pkey_long_press() -> bool;
-    fn board_pmu_shutdown() -> std::ffi::c_int;
-    fn board_pmu_battery_percent() -> std::ffi::c_int;
-}
-
 static POWER_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static LIGHT_SLEEP_LOCK: AtomicPtr<esp_idf_svc::sys::esp_pm_lock> =
     AtomicPtr::new(std::ptr::null_mut());
@@ -16,7 +9,9 @@ static APB_FREQ_LOCK: AtomicPtr<esp_idf_svc::sys::esp_pm_lock> =
 static LIGHT_SLEEP_LOCK_HELD: AtomicBool = AtomicBool::new(false);
 
 pub fn init() -> anyhow::Result<()> {
-    esp_err("board_pmu_init", unsafe { board_pmu_init() })
+    esp_err("board_pmu_init", unsafe {
+        esp_idf_svc::sys::board::board_pmu_init()
+    })
 }
 
 pub fn init_cpu_frequency_scaling() -> anyhow::Result<()> {
@@ -165,7 +160,7 @@ pub fn start_power_key_worker() {
         .name("power-key".to_string())
         .stack_size(4096)
         .spawn(|| loop {
-            if unsafe { board_pmu_take_pkey_long_press() } {
+            if unsafe { esp_idf_svc::sys::board::board_pmu_take_pkey_long_press() } {
                 log::warn!("PWR key long-press detected, shutting down");
                 shutdown();
                 loop {
@@ -183,14 +178,14 @@ pub fn start_power_key_worker() {
 pub fn shutdown() {
     log::warn!("Power shutdown requested");
     let _ = crate::lcd::set_backlight(0);
-    let err = unsafe { board_pmu_shutdown() };
+    let err = unsafe { esp_idf_svc::sys::board::board_pmu_shutdown() };
     if err != esp_idf_svc::sys::ESP_OK as i32 {
         log::error!("board_pmu_shutdown failed: esp_err_t={err}");
     }
 }
 
 pub fn battery_percent() -> Option<u8> {
-    let percent = unsafe { board_pmu_battery_percent() };
+    let percent = unsafe { esp_idf_svc::sys::board::board_pmu_battery_percent() };
     if (0..=100).contains(&percent) {
         Some(percent as u8)
     } else {

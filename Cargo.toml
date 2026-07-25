@@ -56,9 +56,9 @@ tokio = { version = "1.43.0", features = [
 embuild = "0.33"
 
 [[package.metadata.esp-idf-sys.extra_components]]
-component_dirs = ["components"]
-bindings_header = "components/hello.h"
-bindings_module = "hello"
+component_dirs = ["components/board"]
+bindings_header = "components/board/board.h"
+bindings_module = "board"
 
 # esp_new_jpeg: 硬件 JPEG 解码(remote component),用于解码 vibetty 推来的整屏 JPEG
 # 不设 bindings_module → bindings 直接进 esp_idf_svc::sys 顶层(new_jpg.rs 用 `use sys::*`)

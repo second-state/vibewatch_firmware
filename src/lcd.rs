@@ -1,17 +1,6 @@
 use esp_idf_svc::hal::interrupt::asynch::HalIsrNotification;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-// hello.c provides a small C bridge over the Waveshare BSP component.
-extern "C" {
-    fn board_display_init() -> std::ffi::c_int;
-    fn board_display_set_brightness(percent: u8) -> std::ffi::c_int;
-    fn board_touch_init(
-        callback: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    ) -> std::ffi::c_int;
-    fn board_touch_read(x: *mut u16, y: *mut u16, strength: *mut u16) -> bool;
-    fn get_panel_handle() -> esp_idf_svc::sys::esp_lcd_panel_handle_t;
-}
-
 static TOUCH_NOTIFY: HalIsrNotification = HalIsrNotification::new();
 static LCD_COLOR_TRANS_DONE_COUNT: AtomicU32 = AtomicU32::new(0);
 
@@ -36,7 +25,9 @@ pub enum TouchEvent {
 }
 
 pub fn init() -> anyhow::Result<()> {
-    esp_err("board_display_init", unsafe { board_display_init() })?;
+    esp_err("board_display_init", unsafe {
+        esp_idf_svc::sys::board::board_display_init()
+    })?;
     register_color_transfer_done_callback()?;
     clear();
     Ok(())
@@ -44,13 +35,13 @@ pub fn init() -> anyhow::Result<()> {
 
 pub fn touch_init() -> anyhow::Result<()> {
     esp_err("board_touch_init", unsafe {
-        board_touch_init(Some(touch_interrupt_callback))
+        esp_idf_svc::sys::board::board_touch_init(Some(touch_interrupt_callback))
     })
 }
 
 pub fn set_backlight(light: u8) -> anyhow::Result<()> {
     esp_err("board_display_set_brightness", unsafe {
-        board_display_set_brightness(light.min(100))
+        esp_idf_svc::sys::board::board_display_set_brightness(light.min(100))
     })
 }
 
@@ -58,7 +49,8 @@ pub fn read_touch() -> Option<TouchPoint> {
     let mut x = 0;
     let mut y = 0;
     let mut strength = 0;
-    let touched = unsafe { board_touch_read(&mut x, &mut y, &mut strength) };
+    let touched =
+        unsafe { esp_idf_svc::sys::board::board_touch_read(&mut x, &mut y, &mut strength) };
 
     touched.then_some(TouchPoint { x, y, strength })
 }
@@ -120,7 +112,9 @@ pub fn start_touch_worker(tx: tokio::sync::mpsc::Sender<TouchEvent>) -> anyhow::
     Ok(())
 }
 
-unsafe extern "C" fn touch_interrupt_callback(_touch: *mut std::ffi::c_void) {
+unsafe extern "C" fn touch_interrupt_callback(
+    _touch: *mut esp_idf_svc::sys::board::esp_lcd_touch_s,
+) {
     TOUCH_NOTIFY.notify_lsb();
 }
 
@@ -134,7 +128,7 @@ unsafe extern "C" fn color_transfer_done_callback(
 }
 
 fn register_color_transfer_done_callback() -> anyhow::Result<()> {
-    let panel_io = unsafe { esp_idf_svc::sys::hello::get_panel_io_handle() }
+    let panel_io = unsafe { esp_idf_svc::sys::board::get_panel_io_handle() }
         .cast::<esp_idf_svc::sys::esp_lcd_panel_io_t>();
     if panel_io.is_null() {
         return Err(anyhow::anyhow!("get_panel_io_handle returned null"));
@@ -155,10 +149,11 @@ fn register_color_transfer_done_callback() -> anyhow::Result<()> {
 pub fn clear() {
     let byte_per_pixel = LCD_COLOR_BITS / 8;
     let mut color = vec![0_u8; LCD_HEIGHT as usize * LCD_WIDTH as usize * byte_per_pixel as usize];
+    let panel = unsafe { esp_idf_svc::sys::board::get_panel_handle() };
 
     unsafe {
         esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
-            get_panel_handle(),
+            panel as _,
             0,
             0,
             LCD_WIDTH as i32,
@@ -187,7 +182,7 @@ pub fn flush_display(color_data: &[u8], x_start: i32, y_start: i32, x_end: i32, 
         return esp_idf_svc::sys::ESP_ERR_INVALID_SIZE as i32;
     }
 
-    let panel = unsafe { get_panel_handle() };
+    let panel = unsafe { esp_idf_svc::sys::board::get_panel_handle() };
     let done_start = LCD_COLOR_TRANS_DONE_COUNT.load(Ordering::Relaxed);
     let mut submitted_chunks = 0u32;
     let mut y = y_start;
@@ -200,7 +195,7 @@ pub fn flush_display(color_data: &[u8], x_start: i32, y_start: i32, x_end: i32, 
 
         let e = unsafe {
             esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
-                panel,
+                panel as _,
                 x_start,
                 y,
                 x_end,
