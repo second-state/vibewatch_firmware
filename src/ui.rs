@@ -12,6 +12,7 @@ use embedded_graphics::{
     text::{Alignment, Text},
 };
 use embedded_text::TextBox;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use u8g2_fonts::U8g2TextStyle;
 
 const GIF_IMG: &[u8] = include_bytes!("../assets/ht.gif");
@@ -303,6 +304,7 @@ fn new_terminal_renderer() -> embedded_graphics_terminal::TerminalRenderer {
         TEXT_LIGHT,
         ColorFormat::BLACK,
     )
+    .with_theme(TerminalTheme::current().theme())
     .with_fallback_font(u8g2_font_unifont_t_symbols)
     .with_fallback_font(u8g2_font_unifont_t_78_79)
     .with_substitution('›', '>')
@@ -314,6 +316,22 @@ fn new_terminal_renderer() -> embedded_graphics_terminal::TerminalRenderer {
 pub fn terminal_text_cells() -> (u16, u16) {
     let renderer = new_terminal_renderer();
     (renderer.cols() as u16, renderer.rows() as u16)
+}
+
+pub fn terminal_theme_label() -> &'static str {
+    TerminalTheme::current().label()
+}
+
+pub fn terminal_theme_count() -> usize {
+    TerminalTheme::ALL.len()
+}
+
+pub fn terminal_theme_label_at(index: usize) -> &'static str {
+    TerminalTheme::from_index(index).label()
+}
+
+pub fn current_terminal_theme_index() -> usize {
+    TerminalTheme::current().index()
 }
 
 const ALPHA: f32 = 0.5;
@@ -332,6 +350,73 @@ fn build_version_label() -> &'static str {
 }
 const TERMINAL_SCROLL_ROWS: usize = 10;
 const TERMINAL_SCROLLBACK_ROWS: usize = 64;
+static TERMINAL_THEME_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalTheme {
+    Default,
+    Sequoia,
+    SolarizedDark,
+    SolarizedLight,
+    Dracula,
+    GithubDark,
+    Monokai,
+    Aura,
+}
+
+impl TerminalTheme {
+    const ALL: [Self; 8] = [
+        Self::Default,
+        Self::Sequoia,
+        Self::SolarizedDark,
+        Self::SolarizedLight,
+        Self::Dracula,
+        Self::GithubDark,
+        Self::Monokai,
+        Self::Aura,
+    ];
+
+    fn current() -> Self {
+        Self::ALL[TERMINAL_THEME_INDEX.load(Ordering::Relaxed) % Self::ALL.len()]
+    }
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|theme| *theme == self)
+            .unwrap_or(0)
+    }
+
+    fn from_index(index: usize) -> Self {
+        Self::ALL[index % Self::ALL.len()]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Sequoia => "Sequoia",
+            Self::SolarizedDark => "Solarized",
+            Self::SolarizedLight => "Solarized Light",
+            Self::Dracula => "Dracula",
+            Self::GithubDark => "GitHub",
+            Self::Monokai => "Monokai",
+            Self::Aura => "Aura",
+        }
+    }
+
+    fn theme(self) -> embedded_graphics_terminal::Theme {
+        match self {
+            Self::Default => embedded_graphics_terminal::Theme::DEFAULT,
+            Self::Sequoia => embedded_graphics_terminal::Theme::SEQUOIA_MOONLIGHT,
+            Self::SolarizedDark => embedded_graphics_terminal::Theme::SOLARIZED_DARK,
+            Self::SolarizedLight => embedded_graphics_terminal::Theme::SOLARIZED_LIGHT,
+            Self::Dracula => embedded_graphics_terminal::Theme::DRACULA,
+            Self::GithubDark => embedded_graphics_terminal::Theme::GITHUB_DARK,
+            Self::Monokai => embedded_graphics_terminal::Theme::MONOKAI,
+            Self::Aura => embedded_graphics_terminal::Theme::AURA,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct ListItem {
@@ -670,6 +755,13 @@ fn alpha_mix(source: ColorFormat, target: ColorFormat, alpha: f32) -> ColorForma
 }
 
 impl UI {
+    pub fn set_terminal_theme(&mut self, index: usize) -> &'static str {
+        let theme = TerminalTheme::from_index(index);
+        TERMINAL_THEME_INDEX.store(index % TerminalTheme::ALL.len(), Ordering::Relaxed);
+        self.terminal_renderer = None;
+        theme.label()
+    }
+
     pub fn show_status(
         &mut self,
         state: impl Into<String>,

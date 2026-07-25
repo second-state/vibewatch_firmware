@@ -243,11 +243,42 @@ impl AsrResult {
     }
 }
 
-pub struct Driver;
+type HttpClient = embedded_svc::http::client::Client<esp_idf_svc::http::client::EspHttpConnection>;
+
+struct WhisperHttpClient {
+    uri: String,
+    api_key: String,
+    client: HttpClient,
+}
+
+struct WhisperAttemptError {
+    error: anyhow::Error,
+    can_retry: bool,
+}
+
+impl WhisperAttemptError {
+    fn retryable(error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            error: error.into(),
+            can_retry: true,
+        }
+    }
+
+    fn fatal(error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            error: error.into(),
+            can_retry: false,
+        }
+    }
+}
+
+pub struct Driver {
+    whisper: Option<WhisperHttpClient>,
+}
 
 impl Driver {
     pub fn new() -> anyhow::Result<Self> {
-        Ok(Self)
+        Ok(Self { whisper: None })
     }
 
     pub fn read(&mut self, buffer: &mut [u8]) -> anyhow::Result<usize> {
@@ -265,14 +296,7 @@ impl Driver {
         Ok(samples_read * std::mem::size_of::<i16>())
     }
 
-    pub fn start_whisper(
-        &mut self,
-        uri: &str,
-        api_key: &str,
-        model: &str,
-        mut on_start_listen: impl FnMut(),
-        mut is_stop: impl FnMut() -> bool,
-    ) -> anyhow::Result<String> {
+    fn new_whisper_client(uri: &str, api_key: &str) -> anyhow::Result<WhisperHttpClient> {
         #[inline]
         unsafe extern "C" fn wrap_esp_crt_bundle_attach(conf: *mut ::core::ffi::c_void) -> i32 {
             esp_idf_svc::sys::esp_crt_bundle_attach(conf)
@@ -280,38 +304,105 @@ impl Driver {
 
         let config = esp_idf_svc::http::client::Configuration {
             crt_bundle_attach: Some(wrap_esp_crt_bundle_attach),
+            keep_alive_enable: true,
             ..Default::default()
         };
         let conn = esp_idf_svc::http::client::EspHttpConnection::new(&config)?;
-        let mut client = embedded_svc::http::client::Client::wrap(conn);
+        let client = embedded_svc::http::client::Client::wrap(conn);
+        log::info!("Created ASR HTTP keep-alive client for {uri}");
 
+        Ok(WhisperHttpClient {
+            uri: uri.to_string(),
+            api_key: api_key.to_string(),
+            client,
+        })
+    }
+
+    fn ensure_whisper_client(&mut self, uri: &str, api_key: &str) -> anyhow::Result<()> {
+        let reuse = self
+            .whisper
+            .as_ref()
+            .is_some_and(|client| client.uri == uri && client.api_key == api_key);
+        if !reuse {
+            self.whisper = Some(Self::new_whisper_client(uri, api_key)?);
+        }
+
+        Ok(())
+    }
+
+    fn start_whisper_once(
+        &mut self,
+        uri: &str,
+        api_key: &str,
+        model: &str,
+        on_start_listen: &mut impl FnMut(),
+        is_stop: &mut impl FnMut() -> bool,
+    ) -> Result<String, WhisperAttemptError> {
+        self.ensure_whisper_client(uri, api_key)
+            .map_err(WhisperAttemptError::retryable)?;
+        let mut whisper = self
+            .whisper
+            .take()
+            .ok_or_else(|| WhisperAttemptError::retryable(anyhow::anyhow!("ASR client missing")))?;
+
+        let result = self.start_whisper_with_client(
+            &mut whisper.client,
+            uri,
+            api_key,
+            model,
+            on_start_listen,
+            is_stop,
+        );
+        if result.is_ok() {
+            self.whisper = Some(whisper);
+        }
+
+        result
+    }
+
+    fn start_whisper_with_client(
+        &mut self,
+        client: &mut HttpClient,
+        uri: &str,
+        api_key: &str,
+        model: &str,
+        on_start_listen: &mut impl FnMut(),
+        is_stop: &mut impl FnMut() -> bool,
+    ) -> Result<String, WhisperAttemptError> {
         let boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
         let content_type = format!("multipart/form-data; boundary={boundary}");
         let authorization = format!("Bearer {api_key}");
-        let headers = [
+        let headers_with_auth = [
             ("Content-Type", content_type.as_str()),
             ("Authorization", authorization.as_str()),
+            ("Connection", "keep-alive"),
         ];
-        let mut req = client.post(
-            uri,
-            if api_key.is_empty() {
-                &headers[..1]
-            } else {
-                &headers
-            },
-        )?;
+        let headers_without_auth = [
+            ("Content-Type", content_type.as_str()),
+            ("Connection", "keep-alive"),
+        ];
+        let headers = if api_key.is_empty() {
+            &headers_without_auth[..]
+        } else {
+            &headers_with_auth[..]
+        };
+        let mut req = client
+            .post(uri, headers)
+            .map_err(WhisperAttemptError::retryable)?;
 
         let header = format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
         );
-        req.write_all(header.as_bytes())?;
+        req.write_all(header.as_bytes())
+            .map_err(WhisperAttemptError::retryable)?;
 
         let wav_header = crate::util::create_unlimited_wav_header(&crate::util::WavConfig {
             sample_rate: SAMPLE_RATE,
             channels: 1,
             bits_per_sample: 16,
         });
-        req.write_all(&wav_header)?;
+        req.write_all(&wav_header)
+            .map_err(WhisperAttemptError::retryable)?;
 
         on_start_listen();
 
@@ -321,26 +412,32 @@ impl Driver {
             if is_stop() {
                 break;
             }
-            let len = self.read(&mut buffer)?;
+            let len = self.read(&mut buffer).map_err(WhisperAttemptError::fatal)?;
             if len > 0 {
-                req.write_all(&buffer[..len])?;
+                req.write_all(&buffer[..len])
+                    .map_err(WhisperAttemptError::fatal)?;
             }
         }
 
         let model_field = format!(
             "\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n"
         );
-        req.write_all(model_field.as_bytes())?;
+        req.write_all(model_field.as_bytes())
+            .map_err(WhisperAttemptError::fatal)?;
         let footer = format!("--{boundary}--");
-        req.write_all(footer.as_bytes())?;
-        req.flush()?;
+        req.write_all(footer.as_bytes())
+            .map_err(WhisperAttemptError::fatal)?;
+        req.flush().map_err(WhisperAttemptError::fatal)?;
 
-        let mut resp = req.submit()?;
+        let mut resp = req.submit().map_err(WhisperAttemptError::fatal)?;
         log::info!("ASR response status: {}", resp.status());
         let bytes_read =
-            embedded_svc::utils::io::try_read_full(&mut resp, &mut buffer).map_err(|e| e.0)?;
-        let resp_body = std::str::from_utf8(&buffer[..bytes_read])?;
-        let asr_result: AsrResult = serde_json::from_str(resp_body)?;
+            embedded_svc::utils::io::try_read_full(&mut resp, &mut buffer).map_err(|e| e.0);
+        let bytes_read = bytes_read.map_err(WhisperAttemptError::fatal)?;
+        let resp_body =
+            std::str::from_utf8(&buffer[..bytes_read]).map_err(WhisperAttemptError::fatal)?;
+        let asr_result: AsrResult =
+            serde_json::from_str(resp_body).map_err(WhisperAttemptError::fatal)?;
         if let Some(ref e) = asr_result.error {
             log::error!(
                 "ASR error: {}",
@@ -349,6 +446,33 @@ impl Driver {
         }
 
         Ok(asr_result.parse_text())
+    }
+
+    pub fn start_whisper(
+        &mut self,
+        uri: &str,
+        api_key: &str,
+        model: &str,
+        mut on_start_listen: impl FnMut(),
+        mut is_stop: impl FnMut() -> bool,
+    ) -> anyhow::Result<String> {
+        let had_cached_client = self.whisper.is_some();
+        match self.start_whisper_once(uri, api_key, model, &mut on_start_listen, &mut is_stop) {
+            Ok(text) => Ok(text),
+            Err(e) if e.can_retry && had_cached_client => {
+                log::warn!(
+                    "ASR keep-alive connection failed before recording; reconnecting: {:?}",
+                    e.error
+                );
+                self.whisper = None;
+                self.start_whisper_once(uri, api_key, model, &mut on_start_listen, &mut is_stop)
+                    .map_err(|e| e.error)
+            }
+            Err(e) => {
+                self.whisper = None;
+                Err(e.error)
+            }
+        }
     }
 
     pub fn start_asr(

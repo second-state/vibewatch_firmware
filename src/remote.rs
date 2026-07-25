@@ -391,6 +391,7 @@ enum BootMenuAction {
     PowerOff,
     ScreenOff,
     ToggleSound,
+    Theme,
     Back,
 }
 
@@ -405,12 +406,14 @@ async fn show_boot_menu(
     } else {
         "Sound On"
     };
+    let theme_label = format!("Theme: {}", crate::ui::terminal_theme_label());
     let items = vec![
         boot_menu_item(0, "Reboot", crate::ui::UiColor::CSS_DARK_ORANGE),
         boot_menu_item(1, "Power Off", crate::ui::UiColor::CSS_RED),
         boot_menu_item(2, "Screen Off", crate::ui::UiColor::CSS_GRAY),
         boot_menu_item(3, sound_label, crate::ui::UiColor::CSS_GREEN),
-        boot_menu_item(4, "Back", crate::ui::UiColor::CSS_BLACK),
+        boot_menu_item(4, &theme_label, crate::ui::UiColor::CSS_STEEL_BLUE),
+        boot_menu_item(5, "Back", crate::ui::UiColor::CSS_BLACK),
     ];
     gui.display_list("System", &[]).await?;
     wait_touch_release(touch_rx).await;
@@ -420,7 +423,8 @@ async fn show_boot_menu(
         1 => BootMenuAction::PowerOff,
         2 => BootMenuAction::ScreenOff,
         3 => BootMenuAction::ToggleSound,
-        4 => BootMenuAction::Back,
+        4 => BootMenuAction::Theme,
+        5 => BootMenuAction::Back,
         _ => unreachable!(),
     })
 }
@@ -432,6 +436,92 @@ fn boot_menu_item(index: usize, text: &str, bg: crate::ui::UiColor) -> crate::ui
         Some(bg),
         Some(crate::ui::TEXT_LIGHT),
     )
+}
+
+async fn select_terminal_theme(
+    server: &mut MqttServer,
+    gui: &mut UI,
+    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+) -> anyhow::Result<Option<&'static str>> {
+    let mut item_rects = Vec::new();
+    let mut scroll_offset = 0usize;
+    render_terminal_theme_picker(gui, &mut item_rects, scroll_offset).await?;
+
+    let mut press_touch = None;
+    loop {
+        tokio::select! {
+            event = touch_rx.recv() => {
+                match event {
+                    Some(lcd::TouchEvent::Press(touch)) => {
+                        if press_touch.is_none() {
+                            press_touch = Some(touch);
+                        }
+                    }
+                    Some(lcd::TouchEvent::Release(touch)) => {
+                        let Some(start) = press_touch.take() else {
+                            continue;
+                        };
+                        if let Some(delta) = list_scroll_delta(start, touch) {
+                            let visible_count = item_rects.len().max(1);
+                            let total_items = crate::ui::terminal_theme_count() + 1;
+                            let max_offset = total_items.saturating_sub(visible_count);
+                            let next_offset = if delta > 0 {
+                                scroll_offset.saturating_add(delta as usize).min(max_offset)
+                            } else {
+                                scroll_offset.saturating_sub((-delta) as usize)
+                            };
+                            if next_offset != scroll_offset {
+                                scroll_offset = next_offset;
+                                render_terminal_theme_picker(gui, &mut item_rects, scroll_offset).await?;
+                            }
+                            continue;
+                        }
+
+                        let press_index = crate::ui::list_touch_index(start, &item_rects);
+                        let release_index = crate::ui::list_touch_index(touch, &item_rects);
+                        if press_index.is_some() && press_index == release_index {
+                            let index = scroll_offset + press_index.unwrap();
+                            if index >= crate::ui::terminal_theme_count() {
+                                return Ok(None);
+                            }
+                            let label = gui.set_terminal_theme(index);
+                            log::info!("Terminal theme switched to {label}");
+                            return Ok(Some(label));
+                        }
+                    }
+                    None => return Ok(None),
+                }
+            }
+            ev = server.recv() => {
+                match ev {
+                    Some(MqttEvent::Presence { .. }) => {}
+                    Some(MqttEvent::ActiveScreen(_)) | Some(MqttEvent::ActiveText(_)) => {}
+                    None => return Ok(None),
+                }
+            }
+        }
+    }
+}
+
+async fn render_terminal_theme_picker(
+    gui: &mut UI,
+    item_rects: &mut Vec<embedded_graphics::primitives::Rectangle>,
+    scroll_offset: usize,
+) -> anyhow::Result<()> {
+    let current = crate::ui::current_terminal_theme_index();
+    let theme_count = crate::ui::terminal_theme_count();
+    let items: Vec<(String, bool)> = (0..theme_count)
+        .map(|index| {
+            (
+                crate::ui::terminal_theme_label_at(index).to_string(),
+                index == current,
+            )
+        })
+        .chain(std::iter::once(("Back".to_string(), false)))
+        .skip(scroll_offset)
+        .collect();
+    *item_rects = gui.display_menu_list("Theme", &items).await?;
+    Ok(())
 }
 
 async fn show_screen_action_menu(
@@ -1179,6 +1269,18 @@ async fn open_session_picker(
                             log::error!("Failed to save sound setting: {e:?}");
                         }
                         log::info!("Audio prompt enabled={}", *audio_prompt_enabled);
+                        last_session_title = render_session_picker(
+                            server,
+                            gui,
+                            &mut labels,
+                            &mut item_rects,
+                            scroll_offset,
+                        ).await;
+                    }
+                    BootMenuAction::Theme => {
+                        if let Some(theme) = select_terminal_theme(server, gui, touch_rx).await? {
+                            log::info!("Terminal theme selected: {theme}");
+                        }
                         last_session_title = render_session_picker(
                             server,
                             gui,
