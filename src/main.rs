@@ -120,7 +120,7 @@ fn main() -> anyhow::Result<()> {
     // 连 WiFi:从 wifi_list 里挑第一个在范围内的(顺序=优先级)
     gui.show_status("Connecting WiFi...", "").ok();
 
-    let wifi = network::wifi_connect(peripherals.modem, sysloop, &setting.wifi_list);
+    let wifi = network::wifi_connect(peripherals.modem, sysloop, &setting.wifi_list, true);
     if let Err(e) = wifi.as_ref() {
         gui.show_status("WiFi failed", format!("{e:?}\nReset in 5s..."))
             .ok();

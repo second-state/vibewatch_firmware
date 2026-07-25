@@ -44,7 +44,7 @@ where
 {
     gui.show_status("OTA Mode", "Connecting WiFi...").ok();
 
-    let wifi = crate::network::wifi_connect(modem, sysloop, &setting.wifi_list);
+    let wifi = crate::network::wifi_connect(modem, sysloop, &setting.wifi_list, false);
     if let Err(e) = wifi.as_ref() {
         log::error!("OTA wifi connect failed: {e:?}");
         gui.show_status("OTA Mode", "Connect WiFi failed\nRestarting...")

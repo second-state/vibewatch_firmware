@@ -19,6 +19,7 @@ pub fn wifi_connect(
     modem: impl WifiModemPeripheral + 'static,
     sysloop: EspSystemEventLoop,
     wifi_list: &[WifiCred],
+    sync_time_after_connect: bool,
 ) -> anyhow::Result<Box<EspWifi<'static>>> {
     let mut esp_wifi = EspWifi::new(modem, sysloop.clone(), None)?;
     let mut wifi = BlockingWifi::wrap(&mut esp_wifi, sysloop)?;
@@ -88,8 +89,12 @@ pub fn wifi_connect(
     info!("Wifi DHCP info: {:?}", ip_info);
     enable_wifi_power_save()?;
 
-    if let Err(e) = sync_time() {
-        warn!("SNTP sync failed after WiFi connect: {e:?}");
+    if sync_time_after_connect {
+        if let Err(e) = sync_time() {
+            warn!("SNTP sync failed after WiFi connect: {e:?}");
+        }
+    } else {
+        info!("Skipping SNTP sync after WiFi connect");
     }
 
     Ok(Box::new(esp_wifi))
