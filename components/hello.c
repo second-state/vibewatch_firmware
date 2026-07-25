@@ -39,6 +39,11 @@ esp_lcd_panel_handle_t get_panel_handle(void)
     return panel_handle;
 }
 
+esp_lcd_panel_io_handle_t get_panel_io_handle(void)
+{
+    return panel_io_handle;
+}
+
 int board_display_init(void)
 {
     if (panel_handle != NULL) {
