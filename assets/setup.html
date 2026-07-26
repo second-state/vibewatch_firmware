@@ -5,7 +5,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Setup VibeKeys</title>
+    <title>Setup VibeWatch</title>
     <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
     <link href="https://cdn.jsdelivr.net/npm/daisyui@5/themes.css" rel="stylesheet" type="text/css" />
@@ -16,7 +16,7 @@
         <div class="card bg-base-100 shadow-xl">
             <div class="card-body">
                 <div class="flex justify-between items-center mb-6">
-                    <h2 class="card-title text-2xl">Setup VibeKeys via Bluetooth</h2>
+                    <h2 class="card-title text-2xl">Setup VibeWatch via Bluetooth</h2>
                     <div class="flex items-center gap-2">
                         <span class="badge badge-error" id="statusIndicator">●</span>
                         <span id="connectionStatus">Disconnected</span>
@@ -24,7 +24,7 @@
                 </div>
 
                 <button class="btn btn-primary w-full mb-4" id="connectButton">
-                    Connect to VibeKeys
+                    Connect to VibeWatch
                 </button>
 
                 <div id="controlPanel" class="space-y-4">
@@ -51,12 +51,12 @@
 
                     <div class="card bg-base-100 border border-base-300">
                         <div class="card-body">
-                            <h3 class="card-title text-lg" id="urlTitle">VibeKeys Server</h3>
+                            <h3 class="card-title text-lg" id="urlTitle">VibeWatch Server</h3>
                             <label class="form-control">
                                 <div class="label">
                                     <span class="label-text">WebSocket URL</span>
                                 </div>
-                                <input type="text" id="serverUrlInput" placeholder="VibeKeys server WebSocket URL"
+                                <input type="text" id="serverUrlInput" placeholder="VibeWatch server WebSocket URL"
                                     class="input input-bordered w-full">
                             </label>
                         </div>
@@ -345,7 +345,7 @@
                 // Process the disconnect event
                 device.addEventListener('gattserverdisconnected', handleDisconnection);
 
-                showNotification('Success', 'Connected to VibeKeys device');
+                showNotification('Success', 'Connected to VibeWatch device');
 
                 // Auto-load all configuration (skip if WiFi credentials provided via URL)
                 if (!skipAutoLoad) {
@@ -362,7 +362,7 @@
             if (device && device.gatt.connected) {
                 try {
                     await device.gatt.disconnect();
-                    showNotification('Message', 'Disconnected from VibeKeys');
+                    showNotification('Message', 'Disconnected from VibeWatch');
                 } catch (error) {
                     console.error('Disconnect error: ', error);
                     showNotification('Error', 'Disconnect error: ' + error.message, true);
@@ -374,13 +374,13 @@
         function handleDisconnection() {
             isConnected = false;
             updateConnectionStatus();
-            connectButton.textContent = 'Connect to VibeKeys';
+            connectButton.textContent = 'Connect to VibeWatch';
             connectButton.classList.remove('btn-error');
             connectButton.classList.add('btn-primary');
             device = null;
             server = null;
             service = null;
-            showNotification('Message', 'VibeKeys is disconnected');
+            showNotification('Message', 'VibeWatch is disconnected');
         }
 
         // Update the UI
@@ -427,7 +427,7 @@
         // Load all configuration (single read on CONFIG returns a JSON snapshot)
         async function loadAllConfiguration() {
             if (!isConnected || !service) {
-                showNotification('Error', 'VibeKeys is not connected', true);
+                showNotification('Error', 'VibeWatch is not connected', true);
                 return;
             }
 
@@ -472,7 +472,7 @@
         // Save all modifications
         async function saveAllModifications() {
             if (!isConnected || !service) {
-                showNotification('Error', 'VibeKeys is not connected', true);
+                showNotification('Error', 'VibeWatch is not connected', true);
                 return;
             }
 
@@ -529,7 +529,7 @@
         // 写一个部分配置对象到 CONFIG 特征值:一次写可携带多项,设备只更新出现(非 null)的 key。
         async function writeConfigPatch(patch) {
             if (!isConnected || !service) {
-                throw new Error('VibeKeys is not connected');
+                throw new Error('VibeWatch is not connected');
             }
 
             console.log('[CONFIG] write patch:', patch);
@@ -612,7 +612,7 @@
 
         async function uploadAudioFile() {
             if (!isConnected || !service) {
-                showNotification('Error', 'VibeKeys is not connected', true);
+                showNotification('Error', 'VibeWatch is not connected', true);
                 return;
             }
 
