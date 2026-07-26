@@ -977,18 +977,24 @@ impl UI {
         let parse_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - parse_start_us;
         let now_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
 
+        let since_last_render = if self.terminal_last_render_us > 0 {
+            Some(std::time::Duration::from_micros(
+                (now_us - self.terminal_last_render_us) as u64,
+            ))
+        } else {
+            None
+        };
         if !full_frame
-            && self.terminal_last_render_us > 0
-            && std::time::Duration::from_micros((now_us - self.terminal_last_render_us) as u64)
-                < TERMINAL_APPEND_RENDER_TIMEOUT
+            && since_last_render.is_some_and(|elapsed| elapsed < TERMINAL_APPEND_RENDER_TIMEOUT)
         {
+            let elapsed = since_last_render.unwrap();
             log::debug!(
-                "screen_text append skipped render: bytes={} parse={:.2}ms since_render={:.2}ms",
+                "screen_text append delayed render: bytes={} parse={:.2}ms since_render={:.2}ms",
                 bytes.len(),
                 parse_elapsed_us as f32 / 1000.0,
-                (now_us - self.terminal_last_render_us) as f32 / 1000.0
+                elapsed.as_micros() as f32 / 1000.0
             );
-            return Ok(());
+            tokio::time::sleep(TERMINAL_APPEND_RENDER_TIMEOUT - elapsed).await;
         }
 
         let mut renderer = self
