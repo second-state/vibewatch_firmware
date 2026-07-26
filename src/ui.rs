@@ -268,7 +268,7 @@ fn rgb565_be(color: ColorFormat) -> [u8; 2] {
     RawU16::from(color).into_inner().to_be_bytes()
 }
 
-pub fn ui_background() -> Result<(), std::convert::Infallible> {
+pub async fn ui_background() -> Result<(), std::convert::Infallible> {
     let image = tinygif::Gif::<ColorFormat>::from_slice(GIF_IMG).unwrap();
 
     // Create a new framebuffer
@@ -278,15 +278,16 @@ pub fn ui_background() -> Result<(), std::convert::Infallible> {
 
     for frame in image.frames() {
         frame.draw(&mut display)?;
-        crate::lcd::flush_display(
+        crate::lcd::async_flush_display(
             display.data(),
             0,
             0,
             crate::lcd::LCD_WIDTH as i32,
             crate::lcd::LCD_HEIGHT as i32,
-        );
+        )
+        .await;
         let delay_ms = frame.delay_centis * 10;
-        std::thread::sleep(std::time::Duration::from_millis(delay_ms as u64));
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms as u64)).await;
     }
 
     Ok(())
@@ -762,14 +763,14 @@ impl UI {
         theme.label()
     }
 
-    pub fn show_status(
+    pub async fn show_status(
         &mut self,
         state: impl Into<String>,
         text: impl Into<String>,
     ) -> anyhow::Result<()> {
         self.state = state.into();
         self.text = text.into();
-        self.display_flush()
+        self.display_flush().await
     }
 
     /// ASR text editor, adapted from vibekeys_firmware's black TUI-style editor.
@@ -1139,6 +1140,7 @@ impl UI {
         .draw(display)?;
 
         let _ = self.flush_terminal_dirty(modal_rect).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         Ok(())
     }
 
@@ -1226,7 +1228,7 @@ impl UI {
     }
 
     // 横向42个字符
-    fn display_flush(&mut self) -> anyhow::Result<()> {
+    async fn display_flush(&mut self) -> anyhow::Result<()> {
         let image = tinygif::Gif::<ColorFormat>::from_slice(GIF_IMG).unwrap();
         for frame in image.frames() {
             frame.draw(self.display.as_mut())?;
@@ -1270,13 +1272,14 @@ impl UI {
         text_box.draw(self.display.as_mut())?;
 
         for i in 0..5 {
-            let e = crate::lcd::flush_display(
+            let e = crate::lcd::async_flush_display(
                 self.display.data(),
                 0,
                 0,
                 DISPLAY_WIDTH as _,
                 DISPLAY_HEIGHT as _,
-            );
+            )
+            .await;
             if e == 0 {
                 break;
             }

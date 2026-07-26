@@ -74,7 +74,7 @@ pub async fn run(
         Ok(s) => s,
         Err(e) => {
             log::error!("MQTT connect failed: {e:?}");
-            let _ = gui.show_status("MQTT failed", format!("{e:?}"));
+            let _ = gui.show_status("MQTT failed", format!("{e:?}")).await;
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             return Err(e);
         }
@@ -1151,7 +1151,7 @@ async fn open_session_picker(
     // 入口:retained presence 在 subscribe 后很快到达,但需 poll recv 才进 sessions 表。
     // 最多等 1500ms 让它们落地。
     if server.session_labels().is_empty() {
-        let _ = gui.show_status("Loading sessions...", "");
+        let _ = gui.show_status("Loading sessions...", "").await;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
         loop {
             if !server.session_labels().is_empty() {
@@ -1443,7 +1443,7 @@ async fn render_session_picker(
 ) -> String {
     *labels = server.session_labels();
     if labels.is_empty() {
-        let _ = gui.show_status("no session", "");
+        let _ = gui.show_status("no session", "").await;
         item_rects.clear();
         String::new()
     } else {

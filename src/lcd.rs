@@ -144,13 +144,6 @@ fn register_color_transfer_done_callback() -> anyhow::Result<()> {
     })
 }
 
-async fn wait_color_transfer_done_or_timeout() {
-    tokio::select! {
-        _ = LCD_COLOR_TRANS_DONE_NOTIFY.wait() => {}
-        _ = tokio::time::sleep(FLUSH_RETRY_WAIT) => {}
-    }
-}
-
 pub fn clear() {
     let byte_per_pixel = LCD_COLOR_BITS / 8;
     let mut color = vec![0_u8; LCD_HEIGHT as usize * LCD_WIDTH as usize * byte_per_pixel as usize];
@@ -168,10 +161,8 @@ pub fn clear() {
     }
 }
 
-pub fn flush_display(color_data: &[u8], x_start: i32, y_start: i32, x_end: i32, y_end: i32) -> i32 {
-    esp_idf_svc::hal::task::block_on(async_flush_display(
-        color_data, x_start, y_start, x_end, y_end,
-    ))
+async fn wait_color_transfer_done_or_timeout() -> bool {
+    tokio::time::timeout(FLUSH_RETRY_WAIT, LCD_COLOR_TRANS_DONE_NOTIFY.wait()).await.is_ok()
 }
 
 pub async fn async_flush_display(
@@ -210,6 +201,7 @@ pub async fn async_flush_display(
 
         let mut last_error = 0;
         for _ in 0..5 {
+            LCD_COLOR_TRANS_DONE_NOTIFY.reset();
             let e = unsafe {
                 esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
                     panel as _,
@@ -221,13 +213,17 @@ pub async fn async_flush_display(
                 )
             };
             if e == 0 {
+                if !wait_color_transfer_done_or_timeout().await {
+                    log::warn!("flush_display transfer wait timeout after successful submit");
+                    continue;
+                }
                 last_error = 0;
                 break;
             }
 
             last_error = e;
             log::warn!("flush_display error: {}, waiting before retry", e);
-            wait_color_transfer_done_or_timeout().await;
+            let _ = wait_color_transfer_done_or_timeout().await;
         }
         if last_error != 0 {
             return last_error;
