@@ -62,7 +62,7 @@ fn main() -> anyhow::Result<()> {
     }
     // ===
 
-    ui::ui_background().ok();
+    runtime.block_on(ui::ui_background()).ok();
     let mut gui = ui::UI::default();
 
     // A/B 双槽 OTA:标记当前启动槽为有效(确认本次正常启动;配合回滚机制)。
@@ -73,7 +73,8 @@ fn main() -> anyhow::Result<()> {
 
     if setting.need_init() {
         // 首次启动:BLE 配网(手机连蓝牙 "Watch",通过 setup.html 写 WiFi 列表 + MQTT broker)
-        gui.show_status("Setup", "Connect BLE \"Watch\"\nopen setup.html")
+        runtime
+            .block_on(gui.show_status("Setup", "Connect BLE \"Watch\"\nopen setup.html"))
             .ok();
 
         if let Err(e) = ble_provision::provision(nvs) {
@@ -83,26 +84,31 @@ fn main() -> anyhow::Result<()> {
         restart();
     }
 
-    let mode = loop {
-        match runtime.block_on(ui::main_menu(&mut gui, &mut touch_rx))? {
-            ui::MainMenuSelection::Remote => break ui::MainMenuSelection::Remote,
-            ui::MainMenuSelection::Setting => {
-                match runtime.block_on(ui::setting_menu(&mut gui, &mut touch_rx))? {
-                    ui::SettingMenuSelection::Ota => break ui::MainMenuSelection::Setting,
-                    ui::SettingMenuSelection::Ble => {
-                        gui.show_status("BLE Setup", "Connect BLE \"Watch\"\nopen setup.html")
-                            .ok();
-                        if let Err(e) = ble_provision::provision(nvs) {
-                            log::error!("BLE provision failed: {e:?}");
-                            std::thread::sleep(std::time::Duration::from_secs(3));
+    let mode =
+        loop {
+            match runtime.block_on(ui::main_menu(&mut gui, &mut touch_rx))? {
+                ui::MainMenuSelection::Remote => break ui::MainMenuSelection::Remote,
+                ui::MainMenuSelection::Setting => {
+                    match runtime.block_on(ui::setting_menu(&mut gui, &mut touch_rx))? {
+                        ui::SettingMenuSelection::Ota => break ui::MainMenuSelection::Setting,
+                        ui::SettingMenuSelection::Ble => {
+                            runtime
+                                .block_on(gui.show_status(
+                                    "BLE Setup",
+                                    "Connect BLE \"Watch\"\nopen setup.html",
+                                ))
+                                .ok();
+                            if let Err(e) = ble_provision::provision(nvs) {
+                                log::error!("BLE provision failed: {e:?}");
+                                std::thread::sleep(std::time::Duration::from_secs(3));
+                            }
+                            restart();
                         }
-                        restart();
+                        ui::SettingMenuSelection::Back => continue,
                     }
-                    ui::SettingMenuSelection::Back => continue,
                 }
             }
-        }
-    };
+        };
     match mode {
         ui::MainMenuSelection::Remote => {}
         ui::MainMenuSelection::Setting => {
@@ -118,11 +124,14 @@ fn main() -> anyhow::Result<()> {
     }
 
     // 连 WiFi:从 wifi_list 里挑第一个在范围内的(顺序=优先级)
-    gui.show_status("Connecting WiFi...", "").ok();
+    runtime
+        .block_on(gui.show_status("Connecting WiFi...", ""))
+        .ok();
 
-    let wifi = network::wifi_connect(peripherals.modem, sysloop, &setting.wifi_list);
+    let wifi = network::wifi_connect(peripherals.modem, sysloop, &setting.wifi_list, true);
     if let Err(e) = wifi.as_ref() {
-        gui.show_status("WiFi failed", format!("{e:?}\nReset in 5s..."))
+        runtime
+            .block_on(gui.show_status("WiFi failed", format!("{e:?}\nReset in 5s...")))
             .ok();
         std::thread::sleep(std::time::Duration::from_secs(5));
         restart();
@@ -131,7 +140,8 @@ fn main() -> anyhow::Result<()> {
     log::info!("WiFi connected");
 
     // Remote:MQTT 连 vibetty → 进入 session list(停留等输入选会话)
-    gui.show_status("Connecting MQTT...", setting.server_url.clone())
+    runtime
+        .block_on(gui.show_status("Connecting MQTT...", setting.server_url.clone()))
         .ok();
 
     let client_id = wifi_sta_mac_client_id();
@@ -180,7 +190,9 @@ fn main() -> anyhow::Result<()> {
     log::info!("remote exited: {:?}", r);
 
     let mut gui = ui::UI::default();
-    gui.show_status("Disconnected", format!("{:?}", r)).ok();
+    runtime
+        .block_on(gui.show_status("Disconnected", format!("{:?}", r)))
+        .ok();
     std::thread::sleep(std::time::Duration::from_secs(5));
     restart();
 }

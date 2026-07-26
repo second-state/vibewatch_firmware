@@ -52,12 +52,28 @@ impl JpegBufferu16 {
     }
 
     /// 把整张图刷到 LCD (0, 0, width, height)。
-    pub fn flush_to_lcd(&self) -> anyhow::Result<()> {
+    #[allow(dead_code)]
+    pub async fn flush_to_lcd(&self) -> anyhow::Result<()> {
         let ptr = unsafe {
             std::slice::from_raw_parts(self.data.as_ptr() as *const u8, self.data.len() * 16)
         };
 
-        let e = crate::lcd::flush_display(ptr, 0, 0, self.width as i32, self.height as i32);
+        let e =
+            crate::lcd::async_flush_display(ptr, 0, 0, self.width as i32, self.height as i32).await;
+        if e != 0 {
+            Err(anyhow::anyhow!("Failed to flush to LCD: error code {}", e))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub async fn flush_to_lcd_async(&self) -> anyhow::Result<()> {
+        let ptr = unsafe {
+            std::slice::from_raw_parts(self.data.as_ptr() as *const u8, self.data.len() * 16)
+        };
+
+        let e =
+            crate::lcd::async_flush_display(ptr, 0, 0, self.width as i32, self.height as i32).await;
         if e != 0 {
             Err(anyhow::anyhow!("Failed to flush to LCD: error code {}", e))
         } else {
@@ -67,7 +83,7 @@ impl JpegBufferu16 {
 
     /// 取缓冲区 `[offset, offset+win_h)` 像素行刷到 LCD(本地滚动用,目前未用,保留备用)。
     #[allow(dead_code)]
-    pub fn flush_window(&self, offset: usize, win_h: usize) -> anyhow::Result<()> {
+    pub async fn flush_window(&self, offset: usize, win_h: usize) -> anyhow::Result<()> {
         let ptr = unsafe {
             std::slice::from_raw_parts(self.data.as_ptr() as *const u8, self.data.len() * 16)
         };
@@ -78,7 +94,9 @@ impl JpegBufferu16 {
         let start = off * self.width * 2; // 2 bytes per pixel for RGB565
         let end = start + size * self.width * 2;
 
-        let e = crate::lcd::flush_display(&ptr[start..end], 0, 0, self.width as i32, size as i32);
+        let e =
+            crate::lcd::async_flush_display(&ptr[start..end], 0, 0, self.width as i32, size as i32)
+                .await;
         if e != 0 {
             Err(anyhow::anyhow!("Failed to flush to LCD: error code {}", e))
         } else {

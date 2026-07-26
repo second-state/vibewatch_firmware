@@ -1,22 +1,13 @@
 use esp_idf_svc::hal::interrupt::asynch::HalIsrNotification;
 
-// hello.c provides a small C bridge over the Waveshare BSP component.
-extern "C" {
-    fn board_display_init() -> std::ffi::c_int;
-    fn board_display_set_brightness(percent: u8) -> std::ffi::c_int;
-    fn board_touch_init(
-        callback: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    ) -> std::ffi::c_int;
-    fn board_touch_read(x: *mut u16, y: *mut u16, strength: *mut u16) -> bool;
-    fn get_panel_handle() -> esp_idf_svc::sys::esp_lcd_panel_handle_t;
-}
-
 static TOUCH_NOTIFY: HalIsrNotification = HalIsrNotification::new();
+static LCD_COLOR_TRANS_DONE_NOTIFY: HalIsrNotification = HalIsrNotification::new();
 
 pub const LCD_WIDTH: u16 = 410;
 pub const LCD_HEIGHT: u16 = 502;
 pub const LCD_COLOR_BITS: u16 = 16;
 const FLUSH_CHUNK_ROWS: i32 = 64;
+const FLUSH_RETRY_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TouchPoint {
@@ -32,20 +23,23 @@ pub enum TouchEvent {
 }
 
 pub fn init() -> anyhow::Result<()> {
-    esp_err("board_display_init", unsafe { board_display_init() })?;
+    esp_err("board_display_init", unsafe {
+        esp_idf_svc::sys::board::board_display_init()
+    })?;
+    register_color_transfer_done_callback()?;
     clear();
     Ok(())
 }
 
 pub fn touch_init() -> anyhow::Result<()> {
     esp_err("board_touch_init", unsafe {
-        board_touch_init(Some(touch_interrupt_callback))
+        esp_idf_svc::sys::board::board_touch_init(Some(touch_interrupt_callback))
     })
 }
 
 pub fn set_backlight(light: u8) -> anyhow::Result<()> {
     esp_err("board_display_set_brightness", unsafe {
-        board_display_set_brightness(light.min(100))
+        esp_idf_svc::sys::board::board_display_set_brightness(light.min(100))
     })
 }
 
@@ -53,7 +47,8 @@ pub fn read_touch() -> Option<TouchPoint> {
     let mut x = 0;
     let mut y = 0;
     let mut strength = 0;
-    let touched = unsafe { board_touch_read(&mut x, &mut y, &mut strength) };
+    let touched =
+        unsafe { esp_idf_svc::sys::board::board_touch_read(&mut x, &mut y, &mut strength) };
 
     touched.then_some(TouchPoint { x, y, strength })
 }
@@ -115,17 +110,48 @@ pub fn start_touch_worker(tx: tokio::sync::mpsc::Sender<TouchEvent>) -> anyhow::
     Ok(())
 }
 
-unsafe extern "C" fn touch_interrupt_callback(_touch: *mut std::ffi::c_void) {
+unsafe extern "C" fn touch_interrupt_callback(
+    _touch: *mut esp_idf_svc::sys::board::esp_lcd_touch_s,
+) {
     TOUCH_NOTIFY.notify_lsb();
+}
+
+unsafe extern "C" fn color_transfer_done_callback(
+    _panel_io: esp_idf_svc::sys::esp_lcd_panel_io_handle_t,
+    _edata: *mut esp_idf_svc::sys::esp_lcd_panel_io_event_data_t,
+    _user_ctx: *mut std::ffi::c_void,
+) -> bool {
+    LCD_COLOR_TRANS_DONE_NOTIFY.notify_lsb();
+    false
+}
+
+fn register_color_transfer_done_callback() -> anyhow::Result<()> {
+    let panel_io = unsafe { esp_idf_svc::sys::board::get_panel_io_handle() }
+        .cast::<esp_idf_svc::sys::esp_lcd_panel_io_t>();
+    if panel_io.is_null() {
+        return Err(anyhow::anyhow!("get_panel_io_handle returned null"));
+    }
+
+    let callbacks = esp_idf_svc::sys::esp_lcd_panel_io_callbacks_t {
+        on_color_trans_done: Some(color_transfer_done_callback),
+    };
+    esp_err("esp_lcd_panel_io_register_event_callbacks", unsafe {
+        esp_idf_svc::sys::esp_lcd_panel_io_register_event_callbacks(
+            panel_io,
+            &callbacks,
+            std::ptr::null_mut(),
+        )
+    })
 }
 
 pub fn clear() {
     let byte_per_pixel = LCD_COLOR_BITS / 8;
     let mut color = vec![0_u8; LCD_HEIGHT as usize * LCD_WIDTH as usize * byte_per_pixel as usize];
+    let panel = unsafe { esp_idf_svc::sys::board::get_panel_handle() };
 
     unsafe {
         esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
-            get_panel_handle(),
+            panel as _,
             0,
             0,
             LCD_WIDTH as i32,
@@ -135,7 +161,19 @@ pub fn clear() {
     }
 }
 
-pub fn flush_display(color_data: &[u8], x_start: i32, y_start: i32, x_end: i32, y_end: i32) -> i32 {
+async fn wait_color_transfer_done_or_timeout() -> bool {
+    tokio::time::timeout(FLUSH_RETRY_WAIT, LCD_COLOR_TRANS_DONE_NOTIFY.wait())
+        .await
+        .is_ok()
+}
+
+pub async fn async_flush_display(
+    color_data: &[u8],
+    x_start: i32,
+    y_start: i32,
+    x_end: i32,
+    y_end: i32,
+) -> i32 {
     let width = x_end.saturating_sub(x_start);
     let height = y_end.saturating_sub(y_start);
     if width <= 0 || height <= 0 {
@@ -154,7 +192,7 @@ pub fn flush_display(color_data: &[u8], x_start: i32, y_start: i32, x_end: i32, 
         return esp_idf_svc::sys::ESP_ERR_INVALID_SIZE as i32;
     }
 
-    let panel = unsafe { get_panel_handle() };
+    let panel = unsafe { esp_idf_svc::sys::board::get_panel_handle() };
     let mut y = y_start;
     let mut offset = 0usize;
 
@@ -163,19 +201,34 @@ pub fn flush_display(color_data: &[u8], x_start: i32, y_start: i32, x_end: i32, 
         let len = row_bytes * rows as usize;
         let chunk = &color_data[offset..offset + len];
 
-        let e = unsafe {
-            esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
-                panel,
-                x_start,
-                y,
-                x_end,
-                y + rows,
-                chunk.as_ptr().cast(),
-            )
-        };
-        if e != 0 {
-            log::warn!("flush_display error: {}", e);
-            return e;
+        let mut last_error = 0;
+        for _ in 0..5 {
+            LCD_COLOR_TRANS_DONE_NOTIFY.reset();
+            let e = unsafe {
+                esp_idf_svc::sys::esp_lcd_panel_draw_bitmap(
+                    panel as _,
+                    x_start,
+                    y,
+                    x_end,
+                    y + rows,
+                    chunk.as_ptr().cast(),
+                )
+            };
+            if e == 0 {
+                if !wait_color_transfer_done_or_timeout().await {
+                    log::warn!("flush_display transfer wait timeout after successful submit");
+                    continue;
+                }
+                last_error = 0;
+                break;
+            }
+
+            last_error = e;
+            log::warn!("flush_display error: {}, waiting before retry", e);
+            let _ = wait_color_transfer_done_or_timeout().await;
+        }
+        if last_error != 0 {
+            return last_error;
         }
 
         y += rows;

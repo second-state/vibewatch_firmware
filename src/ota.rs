@@ -42,12 +42,13 @@ pub async fn run<M>(
 where
     M: esp_idf_svc::hal::modem::WifiModemPeripheral + 'static,
 {
-    gui.show_status("OTA Mode", "Connecting WiFi...").ok();
+    gui.show_status("OTA Mode", "Connecting WiFi...").await.ok();
 
-    let wifi = crate::network::wifi_connect(modem, sysloop, &setting.wifi_list);
+    let wifi = crate::network::wifi_connect(modem, sysloop, &setting.wifi_list, false);
     if let Err(e) = wifi.as_ref() {
         log::error!("OTA wifi connect failed: {e:?}");
         gui.show_status("OTA Mode", "Connect WiFi failed\nRestarting...")
+            .await
             .ok();
         std::thread::sleep(std::time::Duration::from_secs(3));
         restart();
@@ -79,6 +80,7 @@ where
         0 => {
             log::info!("OTA screen button selected: download latest");
             gui.show_status("OTA Mode", "Downloading latest...\nDevice will reboot")
+                .await
                 .ok();
             screen_tx.send(OtaEvent::DownloadLatest).map_err(|e| {
                 log::error!("OTA channel closed: {:?}", e);
@@ -87,7 +89,7 @@ where
         }
         1 => {
             log::info!("OTA screen button selected: restart");
-            gui.show_status("OTA Mode", "Restarting...").ok();
+            gui.show_status("OTA Mode", "Restarting...").await.ok();
             std::thread::sleep(std::time::Duration::from_millis(500));
             restart();
         }

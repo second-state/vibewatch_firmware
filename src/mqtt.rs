@@ -77,6 +77,7 @@ pub enum MqttEvent {
         prefix: String,
         online: bool,
         list_changed: bool,
+        was_active: bool,
     },
 }
 
@@ -122,6 +123,13 @@ impl ScreenFormat {
         match self {
             Self::Text => "screen_text",
             Self::High | Self::Medium | Self::Low => "screen",
+        }
+    }
+
+    fn screen_qos(self) -> QoS {
+        match self {
+            Self::Text => QoS::AtLeastOnce,
+            Self::High | Self::Medium | Self::Low => QoS::AtMostOnce,
         }
     }
 }
@@ -237,11 +245,17 @@ impl MqttServer {
     /// 把 `active` 落实为 screen 订阅。回调式客户端下 subscribe/unsubscribe 是同步调用,
     /// 不再需要像旧 async 客户端那样并发排水 conn 事件。
     pub async fn flush_pending(&mut self) -> anyhow::Result<()> {
-        let next_topic = self.active.as_ref().and_then(|prefix| {
-            self.sessions
-                .get(prefix)
-                .map(|s| format!("{prefix}/{}", s.format.screen_suffix()))
+        let next_subscription = self.active.as_ref().and_then(|prefix| {
+            self.sessions.get(prefix).map(|s| {
+                (
+                    format!("{prefix}/{}", s.format.screen_suffix()),
+                    s.format.screen_qos(),
+                )
+            })
         });
+        let next_topic = next_subscription
+            .as_ref()
+            .map(|(topic, _)| topic.to_string());
         if next_topic == self.subscribed_screen_topic {
             return Ok(());
         }
@@ -254,10 +268,10 @@ impl MqttServer {
         }
 
         // 再订阅新活跃会话的 screen/screen_text
-        if let Some(new_topic) = next_topic {
-            log::info!("Subscribing session screen topic: {new_topic}");
+        if let Some((new_topic, qos)) = next_subscription {
+            log::info!("Subscribing session screen topic: {new_topic} qos={qos:?}");
             self.client
-                .subscribe(&new_topic, QoS::AtMostOnce)
+                .subscribe(&new_topic, qos)
                 .map_err(|e| anyhow::anyhow!("subscribe screen failed: {e:?}"))?;
             self.subscribed_screen_topic = Some(new_topic);
         }
@@ -286,13 +300,16 @@ impl MqttServer {
                     // LWT:实例下线(空 payload = 删除 retained)
                     log::info!("Session offline (LWT): {topic}");
                     let list_changed = self.sessions.remove(&topic).is_some();
-                    if self.active.as_deref() == Some(topic.as_str()) {
+                    let was_active = self.active.as_deref() == Some(topic.as_str());
+                    if was_active {
+                        log::warn!("Active session went offline: {topic}");
                         self.active = None; // flush_pending 会退订 screen
                     }
                     return Some(MqttEvent::Presence {
                         prefix: topic,
                         online: false,
                         list_changed,
+                        was_active,
                     });
                 } else {
                     match serde_json::from_slice::<Presence>(&data) {
@@ -323,6 +340,7 @@ impl MqttServer {
                                 prefix: p.prefix,
                                 online: true,
                                 list_changed,
+                                was_active: false,
                             });
                         }
                         Err(e) => log::warn!("Bad presence JSON: {e}"),
@@ -396,10 +414,10 @@ impl MqttServer {
     /// 走 `{P}/control` 的 JSON(serde 邻接标签 `{"type":..,"data":..}` 已与服务端对齐)。
     /// 目标 = 用户选定的活跃会话(与 screen 订阅是否已落实无关)。
     pub async fn send(&mut self, msg: ClientMessage) -> anyhow::Result<()> {
-        let prefix = self
-            .active
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No active vibetty session"))?;
+        let Some(prefix) = self.active.clone() else {
+            log::error!("Cannot send {msg:?}: no active vibetty session");
+            return Err(anyhow::anyhow!("No active vibetty session"));
+        };
 
         match msg {
             ClientMessage::PtyInput(bytes) => {
@@ -474,6 +492,10 @@ impl MqttServer {
 
     pub fn clear_active(&mut self) {
         self.active = None;
+    }
+
+    pub fn has_active_session(&self) -> bool {
+        self.active.is_some()
     }
 
     pub fn active_uses_text_screen(&self) -> bool {

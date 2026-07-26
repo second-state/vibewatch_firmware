@@ -17,7 +17,7 @@ use crate::{
 const BACKLIGHT_NORMAL: u8 = 50;
 const SESSION_LIST_IDLE_OFF_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 const SESSION_LIST_LONG_PRESS_MENU_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
-const SESSION_LIST_LONG_PRESS_CANCEL_VERTICAL_PX: i32 = 50;
+const TOUCH_SWIPE_THRESHOLD_PX: i32 = 40;
 const SESSION_LIST_OFF_SHUTDOWN_PROMPT_DELAY: std::time::Duration =
     std::time::Duration::from_secs(20 * 60);
 const IDLE_SHUTDOWN_COUNTDOWN_SECS: u64 = 15;
@@ -74,7 +74,7 @@ pub async fn run(
         Ok(s) => s,
         Err(e) => {
             log::error!("MQTT connect failed: {e:?}");
-            let _ = gui.show_status("MQTT failed", format!("{e:?}"));
+            let _ = gui.show_status("MQTT failed", format!("{e:?}")).await;
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             return Err(e);
         }
@@ -113,7 +113,26 @@ pub async fn run(
                     None => std::future::pending::<()>().await,
                 }
             }, if backspace_touch_active => {
-                send_backspace_key(&mut server).await?;
+                if let Err(e) = send_backspace_key(&mut server).await {
+                    log::warn!("Ignoring backspace repeat after active session disappeared: {e:?}");
+                    backspace_touch_active = false;
+                    backspace_repeat_sent = false;
+                    next_backspace_at = None;
+                    screen_menu_touch_active = false;
+                    swipe_start = None;
+                    open_session_picker(
+                        &mut server,
+                        gui,
+                        &mut touch_rx,
+                        &mut boot_button,
+                        &mut backlight,
+                        audio_prompt,
+                        &mut audio_prompt_enabled,
+                        nvs,
+                    )
+                    .await?;
+                    continue;
+                }
                 backspace_repeat_sent = true;
                 next_backspace_at = Some(tokio::time::Instant::now() + SCREEN_BACKSPACE_REPEAT_DELAY);
             }
@@ -129,12 +148,12 @@ pub async fn run(
                             backspace_repeat_sent = false;
                             next_backspace_at = Some(tokio::time::Instant::now() + SCREEN_BACKSPACE_REPEAT_DELAY);
                             swipe_start = None;
-                            gui.show_session_backspace_overlay()?;
+                            gui.show_session_backspace_overlay().await?;
                         } else if is_screen_menu_point(touch) {
                             log::info!("Screen menu touch started");
                             screen_menu_touch_active = true;
                             swipe_start = None;
-                            gui.show_session_menu_overlay()?;
+                            gui.show_session_menu_overlay().await?;
                         } else if swipe_start.is_none() {
                             swipe_start = Some(touch);
                         }
@@ -145,15 +164,17 @@ pub async fn run(
                             backspace_touch_active = false;
                             next_backspace_at = None;
                             if !backspace_repeat_sent {
-                                send_backspace_key(&mut server).await?;
+                                if let Err(e) = send_backspace_key(&mut server).await {
+                                    log::warn!("Ignoring backspace release after active session disappeared: {e:?}");
+                                }
                             }
-                            redraw_active_cached_screen(&server, gui)?;
+                            redraw_active_cached_screen(&server, gui).await?;
                             continue;
                         }
                         if screen_menu_touch_active {
                             log::info!("Screen menu touch released");
                             screen_menu_touch_active = false;
-                            redraw_active_cached_screen(&server, gui)?;
+                            redraw_active_cached_screen(&server, gui).await?;
                             if is_screen_menu_point(touch) {
                                 show_screen_action_menu(&mut server, gui, &mut touch_rx).await?;
                             }
@@ -189,14 +210,28 @@ pub async fn run(
                                 .await?;
                             } else if let Some(msg) = scroll_swipe_message(start, touch) {
                                 if server.active_uses_text_screen() {
-                                    match try_local_text_scroll(gui, &msg) {
+                                    match try_local_text_scroll(gui, &msg).await {
                                         Ok(true) => continue,
                                         Ok(false) => {}
                                         Err(e) => log::warn!("Local text scroll failed: {e:?}"),
                                     }
                                 }
                                 log::info!("Vertical swipe detected, sending {msg:?}");
-                                server.send(msg).await?;
+                                if let Err(e) = server.send(msg).await {
+                                    log::warn!("Ignoring vertical swipe send after active session disappeared: {e:?}");
+                                    open_session_picker(
+                                        &mut server,
+                                        gui,
+                                        &mut touch_rx,
+                                        &mut boot_button,
+                                        &mut backlight,
+                                        audio_prompt,
+                                        &mut audio_prompt_enabled,
+                                        nvs,
+                                    )
+                                    .await?;
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -212,11 +247,40 @@ pub async fn run(
                     log::warn!("MQTT event source closed, exiting remote loop");
                     break;
                 };
+                let active_session_went_offline = matches!(
+                    &ev,
+                    MqttEvent::Presence {
+                        online: false,
+                        was_active: true,
+                        ..
+                    }
+                );
                 handle_mqtt_event(ev, gui, &mut backlight).await?;
+                if active_session_went_offline {
+                    log::warn!("Returning to session list after active session offline");
+                    swipe_start = None;
+                    backspace_touch_active = false;
+                    backspace_repeat_sent = false;
+                    next_backspace_at = None;
+                    screen_menu_touch_active = false;
+                    server.flush_pending().await?;
+                    open_session_picker(
+                        &mut server,
+                        gui,
+                        &mut touch_rx,
+                        &mut boot_button,
+                        &mut backlight,
+                        audio_prompt,
+                        &mut audio_prompt_enabled,
+                        nvs,
+                    )
+                    .await?;
+                    continue;
+                }
                 if backspace_touch_active {
-                    gui.show_session_backspace_overlay()?;
+                    gui.show_session_backspace_overlay().await?;
                 } else if screen_menu_touch_active {
-                    gui.show_session_menu_overlay()?;
+                    gui.show_session_menu_overlay().await?;
                 }
             }
         }
@@ -246,7 +310,7 @@ async fn handle_mqtt_event(
             log::info!("Screen frame: {}B jpeg", jpeg.len());
             match new_jpg::esp_jpeg_decode_one_picture(jpeg) {
                 Ok(display) => {
-                    if let Err(e) = gui.show_jpeg_screen(display) {
+                    if let Err(e) = gui.show_jpeg_screen(display).await {
                         log::error!("flush screen failed: {e:?}");
                     }
                 }
@@ -255,7 +319,7 @@ async fn handle_mqtt_event(
         }
         MqttEvent::ActiveText(frame) => {
             log::info!("Screen text frame: {}B", frame.len());
-            if let Err(e) = gui.show_terminal_text_frame(&frame) {
+            if let Err(e) = gui.show_terminal_text_frame(&frame).await {
                 log::error!("flush text screen failed: {e:?}");
             }
         }
@@ -263,8 +327,16 @@ async fn handle_mqtt_event(
             prefix,
             online,
             list_changed,
+            was_active,
         } => {
-            log::info!("Presence: {prefix} online={online}");
+            log::info!(
+                "Presence: {prefix} online={online} list_changed={list_changed} was_active={was_active}"
+            );
+            if !online && was_active {
+                log::warn!(
+                    "Active session offline; input sends will fail until a new session is selected"
+                );
+            }
             if list_changed {
                 backlight.set(BacklightMode::Normal)?;
             }
@@ -275,6 +347,11 @@ async fn handle_mqtt_event(
 }
 
 async fn send_active_sync(server: &mut MqttServer, close: bool) -> anyhow::Result<()> {
+    if !server.has_active_session() {
+        log::warn!("Skipping active sync: no active session");
+        return Ok(());
+    }
+
     let msg = if server.active_uses_text_screen() {
         let (cols, rows) = crate::ui::terminal_text_cells();
         log::info!("Sending text-mode sync: cols={cols} rows={rows} close={close}");
@@ -285,13 +362,18 @@ async fn send_active_sync(server: &mut MqttServer, close: bool) -> anyhow::Resul
     server.send(msg).await
 }
 
-fn try_local_text_scroll(gui: &mut UI, msg: &protocol::ClientMessage) -> anyhow::Result<bool> {
+async fn try_local_text_scroll(
+    gui: &mut UI,
+    msg: &protocol::ClientMessage,
+) -> anyhow::Result<bool> {
     match msg {
         protocol::ClientMessage::ScrollUp { .. } => {
             gui.scroll_terminal_text(crate::ui::TerminalScroll::Up)
+                .await
         }
         protocol::ClientMessage::ScrollDown { .. } => {
             gui.scroll_terminal_text(crate::ui::TerminalScroll::Down)
+                .await
         }
         _ => Ok(false),
     }
@@ -309,6 +391,7 @@ enum BootMenuAction {
     PowerOff,
     ScreenOff,
     ToggleSound,
+    Theme,
     Back,
 }
 
@@ -323,14 +406,16 @@ async fn show_boot_menu(
     } else {
         "Sound On"
     };
+    let theme_label = format!("Theme: {}", crate::ui::terminal_theme_label());
     let items = vec![
         boot_menu_item(0, "Reboot", crate::ui::UiColor::CSS_DARK_ORANGE),
         boot_menu_item(1, "Power Off", crate::ui::UiColor::CSS_RED),
         boot_menu_item(2, "Screen Off", crate::ui::UiColor::CSS_GRAY),
         boot_menu_item(3, sound_label, crate::ui::UiColor::CSS_GREEN),
-        boot_menu_item(4, "Back", crate::ui::UiColor::CSS_BLACK),
+        boot_menu_item(4, &theme_label, crate::ui::UiColor::CSS_STEEL_BLUE),
+        boot_menu_item(5, "Back", crate::ui::UiColor::CSS_BLACK),
     ];
-    gui.display_list("System", &[])?;
+    gui.display_list("System", &[]).await?;
     wait_touch_release(touch_rx).await;
     let index = select_remote_list_item(server, gui, touch_rx, "System", &items).await?;
     Ok(match index {
@@ -338,7 +423,8 @@ async fn show_boot_menu(
         1 => BootMenuAction::PowerOff,
         2 => BootMenuAction::ScreenOff,
         3 => BootMenuAction::ToggleSound,
-        4 => BootMenuAction::Back,
+        4 => BootMenuAction::Theme,
+        5 => BootMenuAction::Back,
         _ => unreachable!(),
     })
 }
@@ -350,6 +436,92 @@ fn boot_menu_item(index: usize, text: &str, bg: crate::ui::UiColor) -> crate::ui
         Some(bg),
         Some(crate::ui::TEXT_LIGHT),
     )
+}
+
+async fn select_terminal_theme(
+    server: &mut MqttServer,
+    gui: &mut UI,
+    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+) -> anyhow::Result<Option<&'static str>> {
+    let mut item_rects = Vec::new();
+    let mut scroll_offset = 0usize;
+    render_terminal_theme_picker(gui, &mut item_rects, scroll_offset).await?;
+
+    let mut press_touch = None;
+    loop {
+        tokio::select! {
+            event = touch_rx.recv() => {
+                match event {
+                    Some(lcd::TouchEvent::Press(touch)) => {
+                        if press_touch.is_none() {
+                            press_touch = Some(touch);
+                        }
+                    }
+                    Some(lcd::TouchEvent::Release(touch)) => {
+                        let Some(start) = press_touch.take() else {
+                            continue;
+                        };
+                        if let Some(delta) = list_scroll_delta(start, touch) {
+                            let visible_count = item_rects.len().max(1);
+                            let total_items = crate::ui::terminal_theme_count() + 1;
+                            let max_offset = total_items.saturating_sub(visible_count);
+                            let next_offset = if delta > 0 {
+                                scroll_offset.saturating_add(delta as usize).min(max_offset)
+                            } else {
+                                scroll_offset.saturating_sub((-delta) as usize)
+                            };
+                            if next_offset != scroll_offset {
+                                scroll_offset = next_offset;
+                                render_terminal_theme_picker(gui, &mut item_rects, scroll_offset).await?;
+                            }
+                            continue;
+                        }
+
+                        let press_index = crate::ui::list_touch_index(start, &item_rects);
+                        let release_index = crate::ui::list_touch_index(touch, &item_rects);
+                        if press_index.is_some() && press_index == release_index {
+                            let index = scroll_offset + press_index.unwrap();
+                            if index >= crate::ui::terminal_theme_count() {
+                                return Ok(None);
+                            }
+                            let label = gui.set_terminal_theme(index);
+                            log::info!("Terminal theme switched to {label}");
+                            return Ok(Some(label));
+                        }
+                    }
+                    None => return Ok(None),
+                }
+            }
+            ev = server.recv() => {
+                match ev {
+                    Some(MqttEvent::Presence { .. }) => {}
+                    Some(MqttEvent::ActiveScreen(_)) | Some(MqttEvent::ActiveText(_)) => {}
+                    None => return Ok(None),
+                }
+            }
+        }
+    }
+}
+
+async fn render_terminal_theme_picker(
+    gui: &mut UI,
+    item_rects: &mut Vec<embedded_graphics::primitives::Rectangle>,
+    scroll_offset: usize,
+) -> anyhow::Result<()> {
+    let current = crate::ui::current_terminal_theme_index();
+    let theme_count = crate::ui::terminal_theme_count();
+    let items: Vec<(String, bool)> = (0..theme_count)
+        .map(|index| {
+            (
+                crate::ui::terminal_theme_label_at(index).to_string(),
+                index == current,
+            )
+        })
+        .chain(std::iter::once(("Back".to_string(), false)))
+        .skip(scroll_offset)
+        .collect();
+    *item_rects = gui.display_menu_list("Theme", &items).await?;
+    Ok(())
 }
 
 async fn show_screen_action_menu(
@@ -364,7 +536,7 @@ async fn show_screen_action_menu(
         ("Enter".to_string(), true),
     ];
     let Some(index) = select_screen_menu_item(server, gui, touch_rx, "Menu", &items).await? else {
-        redraw_active_cached_screen(server, gui)?;
+        redraw_active_cached_screen(server, gui).await?;
         return Ok(());
     };
     let action = match index {
@@ -374,32 +546,36 @@ async fn show_screen_action_menu(
         3 => ScreenAction::Enter,
         _ => return Ok(()),
     };
-    match action {
+    let send_result = match action {
         ScreenAction::Esc => {
             server
                 .send(protocol::ClientMessage::pty_input_str("\x1b"))
-                .await?
+                .await
         }
         ScreenAction::Next => {
             server
                 .send(protocol::ClientMessage::pty_input_str("\x1b[B"))
-                .await?
+                .await
         }
         ScreenAction::Yolo => {
             server
                 .send(protocol::ClientMessage::pty_input_str("\x1b[Z"))
-                .await?
+                .await
         }
         ScreenAction::Enter => {
             server
                 .send(protocol::ClientMessage::pty_input_str("\r"))
-                .await?
+                .await
         }
+    };
+    if let Err(e) = send_result {
+        log::warn!("Ignoring screen menu action after active session disappeared: {e:?}");
+        return Ok(());
     }
     if server.active_uses_text_screen() {
-        redraw_active_cached_screen(server, gui)?;
-    } else {
-        send_active_sync(server, false).await?;
+        redraw_active_cached_screen(server, gui).await?;
+    } else if let Err(e) = send_active_sync(server, false).await {
+        log::warn!("Ignoring screen menu sync after active session disappeared: {e:?}");
     }
     Ok(())
 }
@@ -410,12 +586,12 @@ async fn send_backspace_key(server: &mut MqttServer) -> anyhow::Result<()> {
         .await
 }
 
-fn redraw_active_cached_screen(server: &MqttServer, gui: &mut UI) -> anyhow::Result<()> {
+async fn redraw_active_cached_screen(server: &MqttServer, gui: &mut UI) -> anyhow::Result<()> {
     if server.active_uses_text_screen() {
-        if !gui.redraw_cached_terminal_text()? {
+        if !gui.redraw_cached_terminal_text().await? {
             log::warn!("no cached terminal text screen to redraw");
         }
-    } else if !gui.redraw_cached_jpeg_screen()? {
+    } else if !gui.redraw_cached_jpeg_screen().await? {
         log::warn!("no cached JPEG screen to redraw");
     }
     Ok(())
@@ -428,7 +604,7 @@ async fn select_screen_menu_item(
     title: &str,
     items: &[(String, bool)],
 ) -> anyhow::Result<Option<usize>> {
-    let item_rects = gui.display_menu_list(title, items)?;
+    let item_rects = gui.display_menu_list(title, items).await?;
     let mut press_index = None;
     loop {
         tokio::select! {
@@ -470,7 +646,7 @@ async fn select_remote_list_item(
     title: &str,
     items: &[crate::ui::ListItem],
 ) -> anyhow::Result<usize> {
-    let item_rects = gui.display_list(title, items)?;
+    let item_rects = gui.display_list(title, items).await?;
     let mut press_index = None;
     loop {
         tokio::select! {
@@ -511,7 +687,7 @@ async fn run_touch_asr(
 ) -> anyhow::Result<()> {
     let mut editor = TouchAsrEditor::new();
     let mut hint = "Hold Record";
-    let _ = gui.show_asr_editor(&editor.display_text(), hint);
+    let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
 
     let mut press_touch = None;
     loop {
@@ -542,10 +718,10 @@ async fn run_touch_asr(
                                     "ASR error"
                                 }
                             };
-                            let _ = gui.show_asr_editor(&editor.display_text(), hint);
+                            let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
                         } else if let Some(action) = top_asr_action(touch) {
                             apply_top_asr_action(action, &mut editor);
-                            let _ = gui.show_asr_editor(&editor.display_text(), hint);
+                            let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
                             wait_top_asr_action(
                                 server,
                                 gui,
@@ -568,9 +744,16 @@ async fn run_touch_asr(
                                 let text = editor.take_trimmed();
                                 if !text.is_empty() {
                                     let text_mode = server.active_uses_text_screen();
-                                    server.send(protocol::ClientMessage::Input(text)).await?;
+                                    if let Err(e) =
+                                        server.send(protocol::ClientMessage::Input(text)).await
+                                    {
+                                        log::warn!(
+                                            "Ignoring ASR editor send after active session disappeared: {e:?}"
+                                        );
+                                        return Ok(());
+                                    }
                                     if text_mode {
-                                        if let Err(e) = gui.redraw_cached_terminal_text() {
+                                        if let Err(e) = gui.redraw_cached_terminal_text().await {
                                             log::warn!("redraw cached terminal text failed: {e:?}");
                                         }
                                         return Ok(());
@@ -622,7 +805,7 @@ async fn record_asr_once(
         respond,
     };
 
-    let _ = gui.show_asr_editor(display_text, "Connecting...");
+    let _ = gui.show_asr_editor(display_text, "Connecting...").await;
 
     if asr_tx.send(req).is_err() {
         wait_touch_release(touch_rx).await;
@@ -637,7 +820,7 @@ async fn record_asr_once(
             response = &mut listening, if !is_listening => {
                 is_listening = true;
                 if response.is_ok() {
-                    let _ = gui.show_asr_editor(display_text, "Listening...");
+                    let _ = gui.show_asr_editor(display_text, "Listening...").await;
                 }
             }
             response = &mut result => {
@@ -765,7 +948,7 @@ async fn wait_top_asr_action(
         tokio::select! {
             _ = interval.tick() => {
                 apply_top_asr_action(action, editor);
-                let _ = gui.show_asr_editor(&editor.display_text(), hint);
+                let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
             }
             event = touch_rx.recv() => {
                 match event {
@@ -805,16 +988,13 @@ fn top_asr_action(touch: lcd::TouchPoint) -> Option<TopAsrAction> {
 }
 
 fn asr_editor_swipe(start: lcd::TouchPoint, end: lcd::TouchPoint) -> Option<AsrEditorSwipe> {
-    const MIN_VERTICAL_SWIPE_PX: i32 = 80;
-    const MAX_HORIZONTAL_DRIFT_PX: i32 = 100;
-
     if is_asr_touch(start) || top_asr_action(start).is_some() {
         return None;
     }
 
     let dx = (end.x as i32 - start.x as i32).abs();
     let dy = end.y as i32 - start.y as i32;
-    if dx > MAX_HORIZONTAL_DRIFT_PX || dy.abs() < MIN_VERTICAL_SWIPE_PX {
+    if dx > TOUCH_SWIPE_THRESHOLD_PX || dy.abs() < TOUCH_SWIPE_THRESHOLD_PX {
         return None;
     }
     if dy < 0 {
@@ -829,12 +1009,9 @@ fn is_asr_touch(touch: lcd::TouchPoint) -> bool {
 }
 
 fn is_back_swipe(start: lcd::TouchPoint, end: lcd::TouchPoint) -> bool {
-    const MIN_RIGHT_SWIPE_PX: i32 = 80;
-    const MAX_VERTICAL_DRIFT_PX: i32 = 80;
-
     let dx = end.x as i32 - start.x as i32;
     let dy = (end.y as i32 - start.y as i32).abs();
-    dx >= MIN_RIGHT_SWIPE_PX && dy <= MAX_VERTICAL_DRIFT_PX
+    dx >= TOUCH_SWIPE_THRESHOLD_PX && dy <= TOUCH_SWIPE_THRESHOLD_PX
 }
 
 fn is_screen_menu_touch(start: lcd::TouchPoint, end: lcd::TouchPoint) -> bool {
@@ -853,12 +1030,9 @@ fn scroll_swipe_message(
     start: lcd::TouchPoint,
     end: lcd::TouchPoint,
 ) -> Option<protocol::ClientMessage> {
-    const MIN_VERTICAL_SWIPE_PX: i32 = 80;
-    const MAX_HORIZONTAL_DRIFT_PX: i32 = 80;
-
     let dx = (end.x as i32 - start.x as i32).abs();
     let dy = end.y as i32 - start.y as i32;
-    if dx > MAX_HORIZONTAL_DRIFT_PX || dy.abs() < MIN_VERTICAL_SWIPE_PX {
+    if dx > TOUCH_SWIPE_THRESHOLD_PX || dy.abs() < TOUCH_SWIPE_THRESHOLD_PX {
         return None;
     }
 
@@ -907,7 +1081,7 @@ async fn show_idle_shutdown_prompt(
 
     let mut remaining = IDLE_SHUTDOWN_COUNTDOWN_SECS;
     let mut title = idle_shutdown_title(remaining);
-    let item_rects = gui.display_list(&title, &items)?;
+    let item_rects = gui.display_list(&title, &items).await?;
     let mut press_index = None;
     let mut next_tick = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
 
@@ -923,7 +1097,7 @@ async fn show_idle_shutdown_prompt(
                 }
                 next_tick += std::time::Duration::from_secs(1);
                 title = idle_shutdown_title(remaining);
-                gui.refresh_list_title(&title)?;
+                gui.refresh_list_title(&title).await?;
             }
             event = touch_rx.recv() => {
                 match event {
@@ -977,7 +1151,7 @@ async fn open_session_picker(
     // 入口:retained presence 在 subscribe 后很快到达,但需 poll recv 才进 sessions 表。
     // 最多等 1500ms 让它们落地。
     if server.session_labels().is_empty() {
-        let _ = gui.show_status("Loading sessions...", "");
+        let _ = gui.show_status("Loading sessions...", "").await;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
         loop {
             if !server.session_labels().is_empty() {
@@ -994,7 +1168,7 @@ async fn open_session_picker(
     let mut item_rects = Vec::new();
     let mut scroll_offset = 0usize;
     let mut last_session_title =
-        render_session_picker(server, gui, &mut labels, &mut item_rects, scroll_offset);
+        render_session_picker(server, gui, &mut labels, &mut item_rects, scroll_offset).await;
 
     let mut press_touch = None;
     let mut press_started_at = None;
@@ -1010,7 +1184,7 @@ async fn open_session_picker(
                 next_title_refresh = tokio::time::Instant::now() + crate::ui::MENU_TITLE_REFRESH_DELAY;
                 let title = session_picker_title();
                 if title != last_session_title {
-                    gui.refresh_list_title(&title)?;
+                    gui.refresh_list_title(&title).await?;
                     last_session_title = title;
                 }
             }
@@ -1033,7 +1207,7 @@ async fn open_session_picker(
                         &mut labels,
                         &mut item_rects,
                         scroll_offset,
-                    );
+                    ).await;
                 } else {
                     log::warn!("Idle shutdown countdown expired, shutting down");
                     crate::power::shutdown();
@@ -1078,7 +1252,7 @@ async fn open_session_picker(
                             &mut labels,
                             &mut item_rects,
                             scroll_offset,
-                        );
+                        ).await;
                     }
                     BootMenuAction::ToggleSound => {
                         *audio_prompt_enabled = !*audio_prompt_enabled;
@@ -1092,7 +1266,19 @@ async fn open_session_picker(
                             &mut labels,
                             &mut item_rects,
                             scroll_offset,
-                        );
+                        ).await;
+                    }
+                    BootMenuAction::Theme => {
+                        if let Some(theme) = select_terminal_theme(server, gui, touch_rx).await? {
+                            log::info!("Terminal theme selected: {theme}");
+                        }
+                        last_session_title = render_session_picker(
+                            server,
+                            gui,
+                            &mut labels,
+                            &mut item_rects,
+                            scroll_offset,
+                        ).await;
                     }
                     BootMenuAction::Back => {
                         last_session_title = render_session_picker(
@@ -1101,7 +1287,7 @@ async fn open_session_picker(
                             &mut labels,
                             &mut item_rects,
                             scroll_offset,
-                        );
+                        ).await;
                     }
                 }
             }
@@ -1122,7 +1308,7 @@ async fn open_session_picker(
                         &mut labels,
                         &mut item_rects,
                         scroll_offset,
-                    );
+                    ).await;
                     continue;
                 }
                 match event {
@@ -1131,10 +1317,13 @@ async fn open_session_picker(
                             press_touch = Some(touch);
                             press_started_at = Some(tokio::time::Instant::now());
                         } else if let Some(start) = press_touch {
+                            let dx = touch.x as i32 - start.x as i32;
                             let dy = touch.y as i32 - start.y as i32;
-                            if dy.abs() > SESSION_LIST_LONG_PRESS_CANCEL_VERTICAL_PX {
+                            if dx.abs() > TOUCH_SWIPE_THRESHOLD_PX
+                                || dy.abs() > TOUCH_SWIPE_THRESHOLD_PX
+                            {
                                 log::debug!(
-                                    "Session list long press cancelled by vertical movement: dy={dy}"
+                                    "Session list long press cancelled by movement: dx={dx} dy={dy}"
                                 );
                                 press_started_at = None;
                             }
@@ -1145,6 +1334,24 @@ async fn open_session_picker(
                         let Some(start) = press_touch.take() else {
                             continue;
                         };
+                        if is_back_swipe(start, touch) {
+                            log::info!("Session list right swipe detected, refreshing");
+                            last_list_change = tokio::time::Instant::now();
+                            next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
+                            scroll_offset = clamp_session_scroll_offset(
+                                server,
+                                scroll_offset,
+                                item_rects.len().max(1),
+                            );
+                            last_session_title = render_session_picker(
+                                server,
+                                gui,
+                                &mut labels,
+                                &mut item_rects,
+                                scroll_offset,
+                            ).await;
+                            continue;
+                        }
                         if let Some(delta) = list_scroll_delta(start, touch) {
                             let visible_count = item_rects.len().max(1);
                             let max_offset = labels.len().saturating_sub(visible_count);
@@ -1162,7 +1369,7 @@ async fn open_session_picker(
                                     &mut labels,
                                     &mut item_rects,
                                     scroll_offset,
-                                );
+                                ).await;
                             }
                             continue;
                         }
@@ -1175,7 +1382,9 @@ async fn open_session_picker(
                             if let Some((prefix, ..)) = labels.get(index) {
                                 let prefix = prefix.clone();
                                 backlight.set(BacklightMode::Normal)?;
+                                gui.show_loading_modal().await?;
                                 server.set_active(&prefix);
+                                server.flush_pending().await?;
                                 send_active_sync(server, false).await?;
                                 return Ok(());
                             }
@@ -1208,7 +1417,7 @@ async fn open_session_picker(
                                 &mut labels,
                                 &mut item_rects,
                                 scroll_offset,
-                            );
+                            ).await;
                         }
                     }
                     Some(MqttEvent::ActiveScreen(_)) | Some(MqttEvent::ActiveText(_)) => continue,
@@ -1225,7 +1434,7 @@ fn sessions_are_all_idle(labels: &[SessionLabel]) -> bool {
     labels.iter().all(|(_, _, _, is_working)| !*is_working)
 }
 
-fn render_session_picker(
+async fn render_session_picker(
     server: &MqttServer,
     gui: &mut UI,
     labels: &mut Vec<SessionLabel>,
@@ -1234,7 +1443,7 @@ fn render_session_picker(
 ) -> String {
     *labels = server.session_labels();
     if labels.is_empty() {
-        let _ = gui.show_status("no session", "");
+        let _ = gui.show_status("no session", "").await;
         item_rects.clear();
         String::new()
     } else {
@@ -1244,7 +1453,10 @@ fn render_session_picker(
             .map(|(_, label, _, is_working)| (label.clone(), *is_working))
             .collect();
         let title = session_picker_title();
-        *item_rects = gui.display_menu_list(&title, &items).unwrap_or_default();
+        *item_rects = gui
+            .display_menu_list(&title, &items)
+            .await
+            .unwrap_or_default();
         title
     }
 }
@@ -1269,12 +1481,9 @@ fn clamp_session_scroll_offset(
 }
 
 fn list_scroll_delta(start: lcd::TouchPoint, end: lcd::TouchPoint) -> Option<isize> {
-    const MIN_VERTICAL_SWIPE_PX: i32 = 80;
-    const MAX_HORIZONTAL_DRIFT_PX: i32 = 80;
-
     let dx = (end.x as i32 - start.x as i32).abs();
     let dy = end.y as i32 - start.y as i32;
-    if dx > MAX_HORIZONTAL_DRIFT_PX || dy.abs() < MIN_VERTICAL_SWIPE_PX {
+    if dx > TOUCH_SWIPE_THRESHOLD_PX || dy.abs() < TOUCH_SWIPE_THRESHOLD_PX {
         return None;
     }
 

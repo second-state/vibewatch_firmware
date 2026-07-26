@@ -28,6 +28,7 @@ static bool microphone_opened = false;
 
 #define AXP2101_I2C_ADDR (0x34)
 #define AXP2101_STATUS1 (0x00)
+#define AXP2101_STATUS2 (0x01)
 #define AXP2101_COMMON_CONFIG (0x10)
 #define AXP2101_INTEN2 (0x41)
 #define AXP2101_INTSTS2 (0x49)
@@ -37,6 +38,11 @@ static bool microphone_opened = false;
 esp_lcd_panel_handle_t get_panel_handle(void)
 {
     return panel_handle;
+}
+
+esp_lcd_panel_io_handle_t get_panel_io_handle(void)
+{
+    return panel_io_handle;
 }
 
 int board_display_init(void)
@@ -216,6 +222,28 @@ int board_pmu_battery_percent(void)
         percent = 100;
     }
     return percent;
+}
+
+int board_pmu_status1(void)
+{
+    uint8_t status = 0;
+    esp_err_t err = pmu_read_reg(AXP2101_STATUS1, &status);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "read AXP2101 STATUS1 failed: %s", esp_err_to_name(err));
+        return -1;
+    }
+    return status;
+}
+
+int board_pmu_status2(void)
+{
+    uint8_t status = 0;
+    esp_err_t err = pmu_read_reg(AXP2101_STATUS2, &status);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "read AXP2101 STATUS2 failed: %s", esp_err_to_name(err));
+        return -1;
+    }
+    return status;
 }
 
 bool board_touch_read(uint16_t *x, uint16_t *y, uint16_t *strength)
