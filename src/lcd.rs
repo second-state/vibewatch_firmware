@@ -162,7 +162,9 @@ pub fn clear() {
 }
 
 async fn wait_color_transfer_done_or_timeout() -> bool {
-    tokio::time::timeout(FLUSH_RETRY_WAIT, LCD_COLOR_TRANS_DONE_NOTIFY.wait()).await.is_ok()
+    tokio::time::timeout(FLUSH_RETRY_WAIT, LCD_COLOR_TRANS_DONE_NOTIFY.wait())
+        .await
+        .is_ok()
 }
 
 pub async fn async_flush_display(
