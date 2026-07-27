@@ -11,7 +11,8 @@ use std::sync::{
 use embedded_graphics::{prelude::*, primitives::Rectangle};
 
 use crate::{
-    audio, boot::BootButton, lcd, mqtt::MqttEvent, mqtt::MqttServer, new_jpg, protocol, ui::UI,
+    app, audio, boot::BootButton, lcd, mqtt::MqttEvent, mqtt::MqttServer, new_jpg, protocol, touch,
+    ui::UI,
 };
 
 const BACKLIGHT_NORMAL: u8 = 50;
@@ -289,6 +290,437 @@ pub async fn run(
     Ok(())
 }
 
+pub async fn run_(
+    uri: String,
+    client_id: String,
+    gui: &mut UI,
+    touch_rx: tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    mut boot_button: BootButton,
+    asr_tx: std::sync::mpsc::Sender<audio::AsrRequest>,
+    asr_config: Option<&audio::AsrConfig>,
+    audio_prompt: Option<&audio::PromptPlayer>,
+    mut audio_prompt_enabled: bool,
+    nvs: &esp_idf_svc::nvs::EspDefaultNvs,
+) -> anyhow::Result<()> {
+    log::info!("Connecting to MQTT broker {uri} as {client_id} with new UI loop");
+    let mut server = match MqttServer::new(&uri, &client_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("MQTT connect failed: {e:?}");
+            let _ = gui.show_status("MQTT failed", format!("{e:?}")).await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            return Err(e);
+        }
+    };
+    log::info!("MQTT connected, entering new UI session list");
+
+    let mut state = app::AppState::session_picker();
+    let mut render_requested = true;
+
+    let mut touch = touch::TouchInput::new(touch_rx);
+    let mut backlight = BacklightMode::Normal;
+    let mut render_state = app::AppRenderState::new();
+    let mut last_session_list_change = tokio::time::Instant::now();
+    let mut session_list_off_since = None;
+
+    loop {
+        server.flush_pending().await?;
+        if render_requested {
+            state.render(gui, &mut render_state).await?;
+            render_requested = false;
+        }
+
+        let session_shutdown_at = session_list_off_since
+            .map(|instant| instant + SESSION_LIST_OFF_SHUTDOWN_PROMPT_DELAY)
+            .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(3600));
+        let terminal_append_render_at = gui.terminal_append_render_deadline();
+
+        tokio::select! {
+            // 固定窗口合并 terminal append，到点渲染一次。
+            _ = async {
+                match terminal_append_render_at {
+                    Some(when) => tokio::time::sleep_until(when).await,
+                    None => std::future::pending::<()>().await,
+                }
+            }, if terminal_append_render_at.is_some() => {
+                if let Err(e) = gui.render_pending_terminal_append().await {
+                    log::warn!("render pending terminal append failed: {e:?}");
+                }
+            }
+            // 定时刷新 session list 标题里的电量。
+            _ = tokio::time::sleep_until(render_state.next_title_refresh), if state.route == app::Route::SessionPicker && backlight != BacklightMode::Off => {
+                render_requested = state.set_session_title(session_picker_title());
+            }
+            // session list 长时间无变化时自动熄屏。
+            _ = tokio::time::sleep_until(last_session_list_change + SESSION_LIST_IDLE_OFF_DELAY), if state.route == app::Route::SessionPicker && backlight != BacklightMode::Off => {
+                log::info!("Session list unchanged for 30s, turning screen off");
+                execute_simple_effect_(
+                    app::Effect::SetBacklight(app::BacklightState::Off),
+                    &mut server,
+                    &mut backlight,
+                )
+                .await?;
+                session_list_off_since = Some(tokio::time::Instant::now());
+            }
+            // session list 熄屏一段时间后提示自动关机。
+            _ = tokio::time::sleep_until(session_shutdown_at), if state.route == app::Route::SessionPicker && backlight == BacklightMode::Off && session_list_off_since.is_some() && state.all_sessions_idle() => {
+                log::info!("Session list screen off for 20min with no working sessions; prompting shutdown");
+                execute_simple_effect_(
+                    app::Effect::SetBacklight(app::BacklightState::Normal),
+                    &mut server,
+                    &mut backlight,
+                )
+                .await?;
+                session_list_off_since = None;
+                last_session_list_change = tokio::time::Instant::now();
+                if show_idle_shutdown_prompt(&mut server, gui, touch.receiver_mut()).await? {
+                    render_requested = state.request_render_for_current_route();
+                } else {
+                    log::warn!("Idle shutdown countdown expired, shutting down");
+                    execute_simple_effect_(app::Effect::PowerOff, &mut server, &mut backlight).await?;
+                }
+            }
+            // 物理 BOOT 键在 session list 中用于熄屏。
+            _ = crate::boot::wait_boot_press(&mut boot_button), if state.route == app::Route::SessionPicker => {
+                log::info!("BOOT button pressed from new UI session list, turning screen off");
+                execute_simple_effect_(
+                    app::Effect::SetBacklight(app::BacklightState::Off),
+                    &mut server,
+                    &mut backlight,
+                )
+                .await?;
+                session_list_off_since = Some(tokio::time::Instant::now());
+            }
+            // 触摸手势进入 AppState，由 state 决定渲染和 effect。
+            gesture = touch.next_gesture() => {
+                let Some(gesture) = gesture else {
+                    log::warn!("Touch event source closed, exiting new UI loop");
+                    break;
+                };
+                if backlight == BacklightMode::Off {
+                    log::info!("Touch while screen is off, restoring backlight");
+                    execute_simple_effect_(
+                        app::Effect::SetBacklight(app::BacklightState::Normal),
+                        &mut server,
+                        &mut backlight,
+                    )
+                    .await?;
+                    session_list_off_since = None;
+                    last_session_list_change = tokio::time::Instant::now();
+                    render_requested = state.wake_screen();
+                    continue;
+                }
+
+                let result = state.handle_event(
+                    app::AppEvent::Touch(gesture),
+                    &app::AppEventContext {
+                        session_item_rects: &render_state.session_item_rects,
+                    },
+                );
+                let should_render = result.render;
+                let render_after_effect = handle_app_event_result_(
+                    result,
+                    &mut state,
+                    &mut server,
+                    gui,
+                    &mut render_state,
+                    &mut touch,
+                    &mut backlight,
+                    &asr_tx,
+                    asr_config,
+                    audio_prompt,
+                    &mut audio_prompt_enabled,
+                    nvs,
+                )
+                .await?;
+                if render_after_effect {
+                    render_requested = true;
+                }
+                if should_render {
+                    last_session_list_change = tokio::time::Instant::now();
+                }
+            }
+            // MQTT 事件更新 AppState，screen frame 也从这里进入渲染。
+            ev = server.recv() => {
+                let Some(ev) = ev else {
+                    log::warn!("MQTT event source closed, exiting new UI loop");
+                    break;
+                };
+                if matches!(ev, MqttEvent::ActiveScreen(_) | MqttEvent::ActiveText(_))
+                    && !server.has_active_session()
+                {
+                    log::warn!("Ignoring stale screen frame after active session cleared");
+                    continue;
+                }
+                let session_sync = if matches!(&ev, MqttEvent::Presence { list_changed: true, .. }) {
+                    Some(sync_sessions_(&mut state, &server))
+                } else {
+                    None
+                };
+                if let Some(sync) = session_sync.as_ref() {
+                    render_requested |= sync.render;
+                }
+                let result = state.handle_event(
+                    app::AppEvent::Mqtt(ev),
+                    &app::AppEventContext {
+                        session_item_rects: &render_state.session_item_rects,
+                    },
+                );
+                let should_render = result.render;
+                let render_after_effect = handle_app_event_result_(
+                    result,
+                    &mut state,
+                    &mut server,
+                    gui,
+                    &mut render_state,
+                    &mut touch,
+                    &mut backlight,
+                    &asr_tx,
+                    asr_config,
+                    audio_prompt,
+                    &mut audio_prompt_enabled,
+                    nvs,
+                )
+                .await?;
+                if render_after_effect {
+                    render_requested = true;
+                }
+                if let Some(sync) = session_sync {
+                    last_session_list_change = tokio::time::Instant::now();
+                    session_list_off_since = None;
+                    if sync.play_prompt && audio_prompt_enabled {
+                        if let Some(prompt) = audio_prompt {
+                            prompt.play_async();
+                        }
+                    }
+                }
+                if should_render {
+                    render_requested = true;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_app_event_result_(
+    result: app::AppEventResult,
+    state: &mut app::AppState,
+    server: &mut MqttServer,
+    gui: &mut UI,
+    render_state: &mut app::AppRenderState,
+    touch: &mut touch::TouchInput,
+    backlight: &mut BacklightMode,
+    asr_tx: &std::sync::mpsc::Sender<audio::AsrRequest>,
+    asr_config: Option<&audio::AsrConfig>,
+    audio_prompt: Option<&audio::PromptPlayer>,
+    audio_prompt_enabled: &mut bool,
+    nvs: &esp_idf_svc::nvs::EspDefaultNvs,
+) -> anyhow::Result<bool> {
+    let mut render_again = false;
+    if result.render {
+        state.render(gui, render_state).await?;
+    }
+
+    for effect in result.effects {
+        if execute_app_effect_(
+            effect,
+            server,
+            gui,
+            touch,
+            backlight,
+            asr_tx,
+            asr_config,
+            audio_prompt,
+            audio_prompt_enabled,
+            nvs,
+        )
+        .await?
+        {
+            render_again = true;
+        }
+    }
+
+    Ok(render_again)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_app_effect_(
+    effect: app::Effect,
+    server: &mut MqttServer,
+    gui: &mut UI,
+    touch: &mut touch::TouchInput,
+    backlight: &mut BacklightMode,
+    asr_tx: &std::sync::mpsc::Sender<audio::AsrRequest>,
+    asr_config: Option<&audio::AsrConfig>,
+    audio_prompt: Option<&audio::PromptPlayer>,
+    audio_prompt_enabled: &mut bool,
+    nvs: &esp_idf_svc::nvs::EspDefaultNvs,
+) -> anyhow::Result<bool> {
+    let mut render_after_effect = false;
+    match effect {
+        app::Effect::SelectSession(prefix) => {
+            server.set_active(&prefix);
+            server.flush_pending().await?;
+        }
+        app::Effect::ClearActiveSession => {
+            server.clear_active();
+            server.flush_pending().await?;
+        }
+        app::Effect::OpenBootMenu => {
+            log::info!("new UI opening BOOT menu");
+            touch.cancel_active_gesture();
+            match show_boot_menu(server, gui, touch.receiver_mut(), *audio_prompt_enabled).await? {
+                BootMenuAction::Restart => {
+                    execute_simple_effect_(app::Effect::Reboot, server, backlight).await?
+                }
+                BootMenuAction::PowerOff => {
+                    execute_simple_effect_(app::Effect::PowerOff, server, backlight).await?
+                }
+                BootMenuAction::ScreenOff => {
+                    render_after_effect = true;
+                    execute_simple_effect_(
+                        app::Effect::SetBacklight(app::BacklightState::Off),
+                        server,
+                        backlight,
+                    )
+                    .await?;
+                }
+                BootMenuAction::ToggleSound => {
+                    *audio_prompt_enabled = !*audio_prompt_enabled;
+                    if let Err(e) = audio::save_prompt_enabled(nvs, *audio_prompt_enabled) {
+                        log::error!("Failed to save sound setting: {e:?}");
+                    }
+                    if *audio_prompt_enabled {
+                        if let Some(prompt) = audio_prompt {
+                            prompt.play_async();
+                        }
+                    }
+                    render_after_effect = true;
+                }
+                BootMenuAction::Theme => {
+                    if let Some(theme) =
+                        select_terminal_theme(server, gui, touch.receiver_mut()).await?
+                    {
+                        log::info!("Terminal theme selected: {theme}");
+                    }
+                    render_after_effect = true;
+                }
+                BootMenuAction::Back => {
+                    render_after_effect = true;
+                }
+            }
+        }
+        app::Effect::OpenScreenMenu => {
+            touch.cancel_active_gesture();
+            show_screen_action_menu(server, gui, touch.receiver_mut()).await?;
+        }
+        app::Effect::OpenAsrEditor => {
+            touch.cancel_active_gesture();
+            run_touch_asr(server, gui, touch.receiver_mut(), asr_tx, asr_config).await?;
+        }
+        app::Effect::SelectTheme(index) => {
+            let label = gui.set_terminal_theme(index);
+            log::info!("Terminal theme selected by effect: {label}");
+        }
+        other => execute_simple_effect_(other, server, backlight).await?,
+    }
+
+    Ok(render_after_effect)
+}
+
+fn sync_sessions_(state: &mut app::AppState, server: &MqttServer) -> app::SessionSyncResult {
+    state.sync_sessions(session_picker_title(), server.session_labels())
+}
+
+async fn execute_simple_effect_(
+    effect: app::Effect,
+    server: &mut MqttServer,
+    backlight: &mut BacklightMode,
+) -> anyhow::Result<()> {
+    match effect {
+        app::Effect::MqttPublish(command) => execute_mqtt_command_(command, server).await?,
+        app::Effect::MqttSubscribe(topic) => {
+            log::warn!("new UI explicit subscribe effect not implemented yet: {topic}");
+        }
+        app::Effect::MqttUnsubscribe(topic) => {
+            log::warn!("new UI explicit unsubscribe effect not implemented yet: {topic}");
+        }
+        app::Effect::SetBacklight(mode) => {
+            let mode = match mode {
+                app::BacklightState::Normal => BacklightMode::Normal,
+                app::BacklightState::Off => BacklightMode::Off,
+            };
+            backlight.set(mode)?;
+        }
+        app::Effect::PlayAudio(app::AudioCue::Prompt) => {}
+        app::Effect::SelectSession(prefix) => {
+            server.set_active(&prefix);
+            server.flush_pending().await?;
+        }
+        app::Effect::ClearActiveSession => {
+            server.clear_active();
+            server.flush_pending().await?;
+        }
+        app::Effect::OpenBootMenu
+        | app::Effect::OpenScreenMenu
+        | app::Effect::OpenAsrEditor
+        | app::Effect::SelectTheme(_) => {
+            log::warn!("new UI effect requires UI context and was ignored: {effect:?}");
+        }
+        app::Effect::PowerOff => {
+            crate::power::shutdown();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        }
+        app::Effect::Reboot => esp_idf_svc::hal::reset::restart(),
+    }
+    Ok(())
+}
+
+async fn execute_mqtt_command_(
+    command: app::MqttCommand,
+    server: &mut MqttServer,
+) -> anyhow::Result<()> {
+    match command {
+        app::MqttCommand::SendSync { close } => {
+            if let Err(e) = send_active_sync(server, close).await {
+                log::warn!("Ignoring sync after active session disappeared: {e:?}");
+            }
+        }
+        app::MqttCommand::SendKey { key } => {
+            if let Err(e) = server
+                .send(protocol::ClientMessage::pty_input_str(&key))
+                .await
+            {
+                log::warn!("Ignoring key send after active session disappeared: {e:?}");
+            }
+        }
+        app::MqttCommand::SendScrollUp { rows } => {
+            if let Err(e) = server
+                .send(protocol::ClientMessage::ScrollUp { rows })
+                .await
+            {
+                log::warn!("Ignoring scroll-up after active session disappeared: {e:?}");
+            }
+        }
+        app::MqttCommand::SendScrollDown { rows } => {
+            if let Err(e) = server
+                .send(protocol::ClientMessage::ScrollDown { rows })
+                .await
+            {
+                log::warn!("Ignoring scroll-down after active session disappeared: {e:?}");
+            }
+        }
+        app::MqttCommand::Publish { topic, .. } => {
+            log::warn!("new UI raw publish effect not implemented yet: {topic}");
+        }
+    }
+    Ok(())
+}
+
 async fn handle_mqtt_event(
     ev: MqttEvent,
     gui: &mut UI,
@@ -407,26 +839,30 @@ async fn show_boot_menu(
         "Sound On"
     };
     let theme_label = format!("Theme: {}", crate::ui::terminal_theme_label());
-    let items = vec![
-        boot_menu_item(0, "Reboot", crate::ui::UiColor::CSS_DARK_ORANGE),
-        boot_menu_item(1, "Power Off", crate::ui::UiColor::CSS_RED),
-        boot_menu_item(2, "Screen Off", crate::ui::UiColor::CSS_GRAY),
-        boot_menu_item(3, sound_label, crate::ui::UiColor::CSS_GREEN),
-        boot_menu_item(4, &theme_label, crate::ui::UiColor::CSS_STEEL_BLUE),
-        boot_menu_item(5, "Back", crate::ui::UiColor::CSS_BLACK),
-    ];
     gui.display_list("System", &[]).await?;
     wait_touch_release(touch_rx).await;
-    let index = select_remote_list_item(server, gui, touch_rx, "System", &items).await?;
-    Ok(match index {
-        0 => BootMenuAction::Restart,
-        1 => BootMenuAction::PowerOff,
-        2 => BootMenuAction::ScreenOff,
-        3 => BootMenuAction::ToggleSound,
-        4 => BootMenuAction::Theme,
-        5 => BootMenuAction::Back,
-        _ => unreachable!(),
-    })
+    loop {
+        let items = vec![
+            boot_menu_item(0, &power_menu_label(), crate::ui::UiColor::CSS_DARK_ORANGE),
+            boot_menu_item(1, sound_label, crate::ui::UiColor::CSS_GREEN),
+            boot_menu_item(2, &theme_label, crate::ui::UiColor::CSS_STEEL_BLUE),
+            boot_menu_item(3, "Back", crate::ui::UiColor::CSS_BLACK),
+        ];
+        let Some(index) = select_remote_list_item(server, gui, touch_rx, "System", &items).await?
+        else {
+            return Ok(BootMenuAction::Back);
+        };
+        match index {
+            0 => match show_power_menu(server, gui, touch_rx).await? {
+                BootMenuAction::Back => continue,
+                action => return Ok(action),
+            },
+            1 => return Ok(BootMenuAction::ToggleSound),
+            2 => return Ok(BootMenuAction::Theme),
+            3 => return Ok(BootMenuAction::Back),
+            _ => unreachable!(),
+        }
+    }
 }
 
 fn boot_menu_item(index: usize, text: &str, bg: crate::ui::UiColor) -> crate::ui::ListItem {
@@ -436,6 +872,36 @@ fn boot_menu_item(index: usize, text: &str, bg: crate::ui::UiColor) -> crate::ui
         Some(bg),
         Some(crate::ui::TEXT_LIGHT),
     )
+}
+
+fn power_menu_label() -> String {
+    match crate::power::battery_percent() {
+        Some(percent) => format!("Power: Battery {percent}%"),
+        None => "Power: Battery --".to_string(),
+    }
+}
+
+async fn show_power_menu(
+    server: &mut MqttServer,
+    gui: &mut UI,
+    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+) -> anyhow::Result<BootMenuAction> {
+    let items = vec![
+        boot_menu_item(0, "Reboot", crate::ui::UiColor::CSS_DARK_ORANGE),
+        boot_menu_item(1, "Power Off", crate::ui::UiColor::CSS_RED),
+        boot_menu_item(2, "Screen Off", crate::ui::UiColor::CSS_GRAY),
+        boot_menu_item(3, "Back", crate::ui::UiColor::CSS_BLACK),
+    ];
+    let Some(index) = select_remote_list_item(server, gui, touch_rx, "Power", &items).await? else {
+        return Ok(BootMenuAction::Back);
+    };
+    Ok(match index {
+        0 => BootMenuAction::Restart,
+        1 => BootMenuAction::PowerOff,
+        2 => BootMenuAction::ScreenOff,
+        3 => BootMenuAction::Back,
+        _ => unreachable!(),
+    })
 }
 
 async fn select_terminal_theme(
@@ -645,22 +1111,32 @@ async fn select_remote_list_item(
     touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
     title: &str,
     items: &[crate::ui::ListItem],
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<Option<usize>> {
     let item_rects = gui.display_list(title, items).await?;
+    let mut press_touch = None;
     let mut press_index = None;
     loop {
         tokio::select! {
             event = touch_rx.recv() => {
                 match event {
                     Some(lcd::TouchEvent::Press(touch)) => {
+                        if press_touch.is_none() {
+                            press_touch = Some(touch);
+                        }
                         if press_index.is_none() {
                             press_index = crate::ui::list_touch_index(touch, &item_rects);
                         }
                     }
                     Some(lcd::TouchEvent::Release(touch)) => {
+                        if let Some(start) = press_touch.take() {
+                            if is_back_swipe(start, touch) {
+                                log::info!("{title}: right swipe detected, returning");
+                                return Ok(None);
+                            }
+                        }
                         let release_index = crate::ui::list_touch_index(touch, &item_rects);
                         if press_index.is_some() && press_index == release_index {
-                            return Ok(press_index.unwrap());
+                            return Ok(press_index);
                         }
                         press_index = None;
                     }
@@ -1404,17 +1880,19 @@ async fn open_session_picker(
                             last_list_change = tokio::time::Instant::now();
                             next_title_refresh = last_list_change + crate::ui::MENU_TITLE_REFRESH_DELAY;
                             backlight.set(BacklightMode::Normal)?;
-                            if *audio_prompt_enabled {
+                            let next_labels = server.session_labels();
+                            let play_prompt = session_became_idle(&labels, &next_labels);
+                            if play_prompt && *audio_prompt_enabled {
                                 if let Some(prompt) = audio_prompt {
                                     prompt.play_async();
                                 }
                             }
                             off_since = None;
                             scroll_offset = clamp_session_scroll_offset(server, scroll_offset, item_rects.len().max(1));
-                            last_session_title = render_session_picker(
-                                server,
+                            last_session_title = render_session_picker_with_labels(
                                 gui,
                                 &mut labels,
+                                next_labels,
                                 &mut item_rects,
                                 scroll_offset,
                             ).await;
@@ -1434,6 +1912,15 @@ fn sessions_are_all_idle(labels: &[SessionLabel]) -> bool {
     labels.iter().all(|(_, _, _, is_working)| !*is_working)
 }
 
+fn session_became_idle(previous: &[SessionLabel], next: &[SessionLabel]) -> bool {
+    next.iter().any(|(prefix, _, _, is_working)| {
+        !*is_working
+            && previous
+                .iter()
+                .any(|(old_prefix, _, _, old_working)| old_prefix == prefix && *old_working)
+    })
+}
+
 async fn render_session_picker(
     server: &MqttServer,
     gui: &mut UI,
@@ -1441,7 +1928,18 @@ async fn render_session_picker(
     item_rects: &mut Vec<embedded_graphics::primitives::Rectangle>,
     scroll_offset: usize,
 ) -> String {
-    *labels = server.session_labels();
+    let next_labels = server.session_labels();
+    render_session_picker_with_labels(gui, labels, next_labels, item_rects, scroll_offset).await
+}
+
+async fn render_session_picker_with_labels(
+    gui: &mut UI,
+    labels: &mut Vec<SessionLabel>,
+    next_labels: Vec<SessionLabel>,
+    item_rects: &mut Vec<embedded_graphics::primitives::Rectangle>,
+    scroll_offset: usize,
+) -> String {
+    *labels = next_labels;
     if labels.is_empty() {
         let _ = gui.show_status("no session", "").await;
         item_rects.clear();

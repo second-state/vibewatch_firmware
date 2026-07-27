@@ -37,14 +37,14 @@ pub async fn run<M>(
     sysloop: EspSystemEventLoop,
     setting: &crate::setting::Setting,
     gui: &mut crate::ui::UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<crate::lcd::TouchEvent>,
+    touch: &mut crate::touch::TouchInput,
 ) -> anyhow::Result<()>
 where
     M: esp_idf_svc::hal::modem::WifiModemPeripheral + 'static,
 {
     gui.show_status("OTA Mode", "Connecting WiFi...").await.ok();
 
-    let wifi = crate::network::wifi_connect(modem, sysloop, &setting.wifi_list, false);
+    let wifi = crate::network::wifi_connect(modem, sysloop, &setting.wifi_list);
     if let Err(e) = wifi.as_ref() {
         log::error!("OTA wifi connect failed: {e:?}");
         gui.show_status("OTA Mode", "Connect WiFi failed\nRestarting...")
@@ -54,6 +54,7 @@ where
         restart();
     }
     let wifi = wifi.unwrap();
+    crate::network::sync_time_with_ui(gui, touch).await?;
 
     let ip = wifi.sta_netif().get_ip_info()?.ip;
     log::info!("OTA: WiFi connected, IP {}", ip);
@@ -75,7 +76,7 @@ where
         ("Restart".to_string(), false),
     ];
     let title = format!("OTA: {}", ip);
-    let index = crate::ui::select_menu_item(gui, touch_rx, &title, &items).await?;
+    let index = crate::ui::select_menu_item(gui, touch, &title, &items).await?;
     match index {
         0 => {
             log::info!("OTA screen button selected: download latest");

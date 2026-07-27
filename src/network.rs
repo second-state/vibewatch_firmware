@@ -19,7 +19,6 @@ pub fn wifi_connect(
     modem: impl WifiModemPeripheral + 'static,
     sysloop: EspSystemEventLoop,
     wifi_list: &[WifiCred],
-    sync_time_after_connect: bool,
 ) -> anyhow::Result<Box<EspWifi<'static>>> {
     let mut esp_wifi = EspWifi::new(modem, sysloop.clone(), None)?;
     let mut wifi = BlockingWifi::wrap(&mut esp_wifi, sysloop)?;
@@ -89,18 +88,31 @@ pub fn wifi_connect(
     info!("Wifi DHCP info: {:?}", ip_info);
     enable_wifi_power_save()?;
 
-    if sync_time_after_connect {
-        if let Err(e) = sync_time() {
-            warn!("SNTP sync failed after WiFi connect: {e:?}");
-        }
-    } else {
-        info!("Skipping SNTP sync after WiFi connect");
-    }
-
     Ok(Box::new(esp_wifi))
 }
 
-fn sync_time() -> anyhow::Result<()> {
+pub async fn sync_time_with_ui(
+    gui: &mut crate::ui::UI,
+    touch: &mut crate::touch::TouchInput,
+) -> anyhow::Result<()> {
+    loop {
+        match sync_time(gui).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                warn!("SNTP sync failed after WiFi connect: {e:?}");
+                let items = vec![("Retry".to_string(), false), ("Skip".to_string(), false)];
+                let index =
+                    crate::ui::select_menu_item(gui, touch, "Time sync failed", &items).await?;
+                if index == 1 {
+                    warn!("SNTP sync skipped by user");
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+async fn sync_time(gui: &mut crate::ui::UI) -> anyhow::Result<()> {
     use esp_idf_svc::sntp::{EspSntp, OperatingMode, SntpConf, SyncMode, SyncStatus};
 
     info!("SNTP sync ({} servers)", DEFAULT_SNTP_SERVERS.len());
@@ -110,13 +122,18 @@ fn sync_time() -> anyhow::Result<()> {
         sync_mode: SyncMode::Immediate,
     };
     let ntp = EspSntp::new(&conf)?;
-    for i in 0..15 {
+    for i in 0..30 {
+        let dots = i % 3 + 1;
+        gui.show_status(format!("Sync time{}", ".".repeat(dots)), "")
+            .await
+            .ok();
         if ntp.get_sync_status() == SyncStatus::Completed {
             info!("SNTP sync completed");
+            gui.show_status("Sync time...", "Done").await.ok();
             return Ok(());
         }
         info!("sntp waiting ({})", i);
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     Err(anyhow::anyhow!("SNTP sync timeout"))
 }

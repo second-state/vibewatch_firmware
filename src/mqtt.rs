@@ -75,6 +75,7 @@ pub enum MqttEvent {
     /// 会话注册表变化:上线(online=true)/下线 LWT(online=false)。
     Presence {
         prefix: String,
+        // todo : merge online & list_changed
         online: bool,
         list_changed: bool,
         was_active: bool,

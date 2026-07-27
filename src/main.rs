@@ -1,5 +1,6 @@
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::reset::restart};
 
+mod app;
 mod audio;
 mod ble_provision;
 mod boot;
@@ -12,8 +13,11 @@ mod power;
 mod protocol;
 mod remote;
 mod setting;
+mod touch;
 mod ui;
 mod util;
+
+const USE_NEW_REMOTE_UI: bool = true;
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -37,8 +41,9 @@ fn main() -> anyhow::Result<()> {
     // === LCD + touch: Waveshare ESP32-S3-Touch-AMOLED-2.06 BSP ===
     lcd::init()?;
     lcd::touch_init()?;
-    let (touch_tx, mut touch_rx) = tokio::sync::mpsc::channel::<lcd::TouchEvent>(16);
+    let (touch_tx, touch_rx) = tokio::sync::mpsc::channel::<lcd::TouchEvent>(16);
     lcd::start_touch_worker(touch_tx)?;
+    let mut touch = touch::TouchInput::new(touch_rx);
     let boot_button = boot::new_boot_button(peripherals.pins.gpio0.into())?;
     lcd::set_backlight(30)?;
     power::init()?;
@@ -86,10 +91,10 @@ fn main() -> anyhow::Result<()> {
 
     let mode =
         loop {
-            match runtime.block_on(ui::main_menu(&mut gui, &mut touch_rx))? {
+            match runtime.block_on(ui::main_menu(&mut gui, &mut touch))? {
                 ui::MainMenuSelection::Remote => break ui::MainMenuSelection::Remote,
                 ui::MainMenuSelection::Setting => {
-                    match runtime.block_on(ui::setting_menu(&mut gui, &mut touch_rx))? {
+                    match runtime.block_on(ui::setting_menu(&mut gui, &mut touch))? {
                         ui::SettingMenuSelection::Ota => break ui::MainMenuSelection::Setting,
                         ui::SettingMenuSelection::Ble => {
                             runtime
@@ -117,7 +122,7 @@ fn main() -> anyhow::Result<()> {
                 sysloop,
                 &setting,
                 &mut gui,
-                &mut touch_rx,
+                &mut touch,
             ))?;
             return Ok(());
         }
@@ -128,7 +133,7 @@ fn main() -> anyhow::Result<()> {
         .block_on(gui.show_status("Connecting WiFi...", ""))
         .ok();
 
-    let wifi = network::wifi_connect(peripherals.modem, sysloop, &setting.wifi_list, true);
+    let wifi = network::wifi_connect(peripherals.modem, sysloop, &setting.wifi_list);
     if let Err(e) = wifi.as_ref() {
         runtime
             .block_on(gui.show_status("WiFi failed", format!("{e:?}\nReset in 5s...")))
@@ -138,6 +143,7 @@ fn main() -> anyhow::Result<()> {
     }
     let _wifi = wifi.unwrap();
     log::info!("WiFi connected");
+    runtime.block_on(network::sync_time_with_ui(&mut gui, &mut touch))?;
 
     // Remote:MQTT 连 vibetty → 进入 session list(停留等输入选会话)
     runtime
@@ -175,18 +181,33 @@ fn main() -> anyhow::Result<()> {
         log::error!("Failed to spawn ASR worker thread: {e:?}");
     }
 
-    let r = runtime.block_on(remote::run(
-        setting.server_url,
-        client_id,
-        &mut gui,
-        touch_rx,
-        boot_button,
-        asr_tx,
-        asr_config.as_ref(),
-        audio_prompt_player.as_ref(),
-        audio_prompt_enabled,
-        &nvs,
-    ));
+    let r = if USE_NEW_REMOTE_UI {
+        runtime.block_on(remote::run_(
+            setting.server_url,
+            client_id,
+            &mut gui,
+            touch.into_inner(),
+            boot_button,
+            asr_tx,
+            asr_config.as_ref(),
+            audio_prompt_player.as_ref(),
+            audio_prompt_enabled,
+            &nvs,
+        ))
+    } else {
+        runtime.block_on(remote::run(
+            setting.server_url,
+            client_id,
+            &mut gui,
+            touch.into_inner(),
+            boot_button,
+            asr_tx,
+            asr_config.as_ref(),
+            audio_prompt_player.as_ref(),
+            audio_prompt_enabled,
+            &nvs,
+        ))
+    };
     log::info!("remote exited: {:?}", r);
 
     let mut gui = ui::UI::default();
