@@ -58,7 +58,7 @@ pub async fn run(
     uri: String,
     client_id: String,
     gui: &mut UI,
-    touch_rx: tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    mut touch: touch::TouchInput,
     mut boot_button: BootButton,
     asr_tx: std::sync::mpsc::Sender<audio::AsrRequest>,
     asr_config: Option<&audio::AsrConfig>,
@@ -81,7 +81,6 @@ pub async fn run(
     let mut state = app::AppState::session_picker();
     let mut render_requested = true;
 
-    let mut touch = touch::TouchInput::new(touch_rx);
     let mut backlight = BacklightMode::Normal;
     let mut render_state = app::AppRenderState::new();
     let mut last_session_list_change = tokio::time::Instant::now();
@@ -137,7 +136,7 @@ pub async fn run(
                 .await?;
                 session_list_off_since = None;
                 last_session_list_change = tokio::time::Instant::now();
-                if show_idle_shutdown_prompt(&mut server, gui, touch.receiver_mut()).await? {
+                if show_idle_shutdown_prompt(&mut server, gui, &mut touch).await? {
                     render_requested = state.request_render_for_current_route();
                 } else {
                     log::warn!("Idle shutdown countdown expired, shutting down");
@@ -335,7 +334,7 @@ async fn execute_app_effect_(
         app::Effect::OpenBootMenu => {
             log::info!("new UI opening BOOT menu");
             touch.cancel_active_gesture();
-            match show_boot_menu(server, gui, touch.receiver_mut(), *audio_prompt_enabled).await? {
+            match show_boot_menu(server, gui, touch, *audio_prompt_enabled).await? {
                 BootMenuAction::Restart => {
                     execute_simple_effect_(app::Effect::Reboot, server, backlight).await?
                 }
@@ -364,9 +363,7 @@ async fn execute_app_effect_(
                     render_after_effect = true;
                 }
                 BootMenuAction::Theme => {
-                    if let Some(theme) =
-                        select_terminal_theme(server, gui, touch.receiver_mut()).await?
-                    {
+                    if let Some(theme) = select_terminal_theme(server, gui, touch).await? {
                         log::info!("Terminal theme selected: {theme}");
                     }
                     render_after_effect = true;
@@ -378,11 +375,11 @@ async fn execute_app_effect_(
         }
         app::Effect::OpenScreenMenu => {
             touch.cancel_active_gesture();
-            show_screen_action_menu(server, gui, touch.receiver_mut()).await?;
+            show_screen_action_menu(server, gui, touch).await?;
         }
         app::Effect::OpenAsrEditor => {
             touch.cancel_active_gesture();
-            run_touch_asr(server, gui, touch.receiver_mut(), asr_tx, asr_config).await?;
+            run_touch_asr(server, gui, touch, asr_tx, asr_config).await?;
         }
         app::Effect::SelectTheme(index) => {
             let label = gui.set_terminal_theme(index);
@@ -520,7 +517,7 @@ enum BootMenuAction {
 async fn show_boot_menu(
     server: &mut MqttServer,
     gui: &mut UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    touch: &mut touch::TouchInput,
     audio_prompt_enabled: bool,
 ) -> anyhow::Result<BootMenuAction> {
     let sound_label = if audio_prompt_enabled {
@@ -530,7 +527,7 @@ async fn show_boot_menu(
     };
     let theme_label = format!("Theme: {}", crate::ui::terminal_theme_label());
     gui.display_list("System", &[]).await?;
-    wait_touch_release(touch_rx).await;
+    touch.wait_release().await;
     loop {
         let items = vec![
             boot_menu_item(0, &power_menu_label(), crate::ui::UiColor::CSS_DARK_ORANGE),
@@ -538,12 +535,12 @@ async fn show_boot_menu(
             boot_menu_item(2, &theme_label, crate::ui::UiColor::CSS_STEEL_BLUE),
             boot_menu_item(3, "Back", crate::ui::UiColor::CSS_BLACK),
         ];
-        let Some(index) = select_remote_list_item(server, gui, touch_rx, "System", &items).await?
+        let Some(index) = select_remote_list_item(server, gui, touch, "System", &items).await?
         else {
             return Ok(BootMenuAction::Back);
         };
         match index {
-            0 => match show_power_menu(server, gui, touch_rx).await? {
+            0 => match show_power_menu(server, gui, touch).await? {
                 BootMenuAction::Back => continue,
                 action => return Ok(action),
             },
@@ -574,7 +571,7 @@ fn power_menu_label() -> String {
 async fn show_power_menu(
     server: &mut MqttServer,
     gui: &mut UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    touch: &mut touch::TouchInput,
 ) -> anyhow::Result<BootMenuAction> {
     let items = vec![
         boot_menu_item(0, "Reboot", crate::ui::UiColor::CSS_DARK_ORANGE),
@@ -582,7 +579,7 @@ async fn show_power_menu(
         boot_menu_item(2, "Screen Off", crate::ui::UiColor::CSS_GRAY),
         boot_menu_item(3, "Back", crate::ui::UiColor::CSS_BLACK),
     ];
-    let Some(index) = select_remote_list_item(server, gui, touch_rx, "Power", &items).await? else {
+    let Some(index) = select_remote_list_item(server, gui, touch, "Power", &items).await? else {
         return Ok(BootMenuAction::Back);
     };
     Ok(match index {
@@ -597,27 +594,21 @@ async fn show_power_menu(
 async fn select_terminal_theme(
     server: &mut MqttServer,
     gui: &mut UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    touch: &mut touch::TouchInput,
 ) -> anyhow::Result<Option<&'static str>> {
     let mut item_rects = Vec::new();
     let mut scroll_offset = 0usize;
     render_terminal_theme_picker(gui, &mut item_rects, scroll_offset).await?;
 
-    let mut press_touch = None;
     loop {
         tokio::select! {
-            event = touch_rx.recv() => {
-                match event {
-                    Some(lcd::TouchEvent::Press(touch)) => {
-                        if press_touch.is_none() {
-                            press_touch = Some(touch);
+            gesture = touch.next_gesture() => {
+                match gesture {
+                    Some(touch::TouchGesture::Swipe { start, end, direction, .. }) => {
+                        if direction == touch::SwipeDirection::Right {
+                            return Ok(None);
                         }
-                    }
-                    Some(lcd::TouchEvent::Release(touch)) => {
-                        let Some(start) = press_touch.take() else {
-                            continue;
-                        };
-                        if let Some(delta) = list_scroll_delta(start, touch) {
+                        if let Some(delta) = list_scroll_delta(start, end) {
                             let visible_count = item_rects.len().max(1);
                             let total_items = crate::ui::terminal_theme_count() + 1;
                             let max_offset = total_items.saturating_sub(visible_count);
@@ -630,11 +621,11 @@ async fn select_terminal_theme(
                                 scroll_offset = next_offset;
                                 render_terminal_theme_picker(gui, &mut item_rects, scroll_offset).await?;
                             }
-                            continue;
                         }
-
+                    }
+                    Some(touch::TouchGesture::Click { start, end }) => {
                         let press_index = crate::ui::list_touch_index(start, &item_rects);
-                        let release_index = crate::ui::list_touch_index(touch, &item_rects);
+                        let release_index = crate::ui::list_touch_index(end, &item_rects);
                         if press_index.is_some() && press_index == release_index {
                             let index = scroll_offset + press_index.unwrap();
                             if index >= crate::ui::terminal_theme_count() {
@@ -645,6 +636,7 @@ async fn select_terminal_theme(
                             return Ok(Some(label));
                         }
                     }
+                    Some(_) => {}
                     None => return Ok(None),
                 }
             }
@@ -683,7 +675,7 @@ async fn render_terminal_theme_picker(
 async fn show_screen_action_menu(
     server: &mut MqttServer,
     gui: &mut UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    touch: &mut touch::TouchInput,
 ) -> anyhow::Result<()> {
     let items = vec![
         ("Esc".to_string(), true),
@@ -691,7 +683,7 @@ async fn show_screen_action_menu(
         ("Yolo".to_string(), true),
         ("Enter".to_string(), true),
     ];
-    let Some(index) = select_screen_menu_item(server, gui, touch_rx, "Menu", &items).await? else {
+    let Some(index) = select_screen_menu_item(server, gui, touch, "Menu", &items).await? else {
         redraw_active_cached_screen(server, gui).await?;
         return Ok(());
     };
@@ -750,31 +742,27 @@ async fn redraw_active_cached_screen(server: &MqttServer, gui: &mut UI) -> anyho
 async fn select_screen_menu_item(
     server: &mut MqttServer,
     gui: &mut UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    touch: &mut touch::TouchInput,
     title: &str,
     items: &[(String, bool)],
 ) -> anyhow::Result<Option<usize>> {
     let item_rects = gui.display_menu_list(title, items).await?;
-    let mut press_index = None;
     loop {
         tokio::select! {
-            event = touch_rx.recv() => {
-                match event {
-                    Some(lcd::TouchEvent::Press(touch)) => {
-                        if press_index.is_none() {
-                            press_index = crate::ui::list_touch_index(touch, &item_rects);
-                        }
-                    }
-                    Some(lcd::TouchEvent::Release(touch)) => {
-                        let release_index = crate::ui::list_touch_index(touch, &item_rects);
+            gesture = touch.next_gesture() => {
+                match gesture {
+                    Some(touch::TouchGesture::Click { start, end }) => {
+                        let press_index = crate::ui::list_touch_index(start, &item_rects);
+                        let release_index = crate::ui::list_touch_index(end, &item_rects);
                         if press_index.is_some() && press_index == release_index {
                             return Ok(press_index);
                         }
                         if press_index.is_none() && release_index.is_none() {
                             return Ok(None);
                         }
-                        press_index = None;
                     }
+                    Some(touch::TouchGesture::Swipe { direction: touch::SwipeDirection::Right, .. }) => return Ok(None),
+                    Some(_) => {}
                     None => return Err(anyhow::anyhow!("touch event source closed during screen menu")),
                 }
             }
@@ -792,38 +780,27 @@ async fn select_screen_menu_item(
 async fn select_remote_list_item(
     server: &mut MqttServer,
     gui: &mut UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    touch: &mut touch::TouchInput,
     title: &str,
     items: &[crate::ui::ListItem],
 ) -> anyhow::Result<Option<usize>> {
     let item_rects = gui.display_list(title, items).await?;
-    let mut press_touch = None;
-    let mut press_index = None;
     loop {
         tokio::select! {
-            event = touch_rx.recv() => {
-                match event {
-                    Some(lcd::TouchEvent::Press(touch)) => {
-                        if press_touch.is_none() {
-                            press_touch = Some(touch);
-                        }
-                        if press_index.is_none() {
-                            press_index = crate::ui::list_touch_index(touch, &item_rects);
-                        }
+            gesture = touch.next_gesture() => {
+                match gesture {
+                    Some(touch::TouchGesture::Swipe { direction: touch::SwipeDirection::Right, .. }) => {
+                        log::info!("{title}: right swipe detected, returning");
+                        return Ok(None);
                     }
-                    Some(lcd::TouchEvent::Release(touch)) => {
-                        if let Some(start) = press_touch.take() {
-                            if is_back_swipe(start, touch) {
-                                log::info!("{title}: right swipe detected, returning");
-                                return Ok(None);
-                            }
-                        }
-                        let release_index = crate::ui::list_touch_index(touch, &item_rects);
+                    Some(touch::TouchGesture::Click { start, end }) => {
+                        let press_index = crate::ui::list_touch_index(start, &item_rects);
+                        let release_index = crate::ui::list_touch_index(end, &item_rects);
                         if press_index.is_some() && press_index == release_index {
                             return Ok(press_index);
                         }
-                        press_index = None;
                     }
+                    Some(_) => {}
                     None => return Err(anyhow::anyhow!("touch event source closed during custom menu")),
                 }
             }
@@ -841,7 +818,7 @@ async fn select_remote_list_item(
 async fn run_touch_asr(
     server: &mut MqttServer,
     gui: &mut UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    touch: &mut touch::TouchInput,
     asr_tx: &std::sync::mpsc::Sender<audio::AsrRequest>,
     asr_config: Option<&audio::AsrConfig>,
 ) -> anyhow::Result<()> {
@@ -849,17 +826,16 @@ async fn run_touch_asr(
     let mut hint = "Hold Record";
     let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
 
-    let mut press_touch = None;
     loop {
         tokio::select! {
-            event = touch_rx.recv() => {
-                match event {
-                    Some(lcd::TouchEvent::Press(touch)) => {
-                        if is_asr_touch(touch) {
+            gesture = touch.next_gesture() => {
+                match gesture {
+                    Some(touch::TouchGesture::Press { point }) => {
+                        if is_asr_touch(point) {
                             hint = match record_asr_once(
                                 server,
                                 gui,
-                                touch_rx,
+                                touch,
                                 asr_tx,
                                 asr_config.cloned(),
                                 &editor.display_text(),
@@ -879,27 +855,14 @@ async fn run_touch_asr(
                                 }
                             };
                             let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
-                        } else if let Some(action) = top_asr_action(touch) {
+                        } else if let Some(action) = top_asr_action(point) {
                             apply_top_asr_action(action, &mut editor);
                             let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
-                            wait_top_asr_action(
-                                server,
-                                gui,
-                                touch_rx,
-                                action,
-                                &mut editor,
-                                hint,
-                            )
-                            .await?;
-                        } else if press_touch.is_none() {
-                            press_touch = Some(touch);
+                            wait_top_asr_action(server, gui, touch, action, &mut editor, hint).await?;
                         }
                     }
-                    Some(lcd::TouchEvent::Release(touch)) => {
-                        let Some(start) = press_touch.take() else {
-                            continue;
-                        };
-                        match asr_editor_swipe(start, touch) {
+                    Some(touch::TouchGesture::Swipe { start, end, .. }) => {
+                        match asr_editor_swipe(start, end) {
                             Some(AsrEditorSwipe::Send) => {
                                 let text = editor.take_trimmed();
                                 if !text.is_empty() {
@@ -930,6 +893,7 @@ async fn run_touch_asr(
                             None => {}
                         }
                     }
+                    Some(_) => {}
                     None => return Err(anyhow::anyhow!("touch event source closed during ASR editor")),
                 }
             }
@@ -945,13 +909,13 @@ async fn run_touch_asr(
 async fn record_asr_once(
     server: &mut MqttServer,
     gui: &mut UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    touch: &mut touch::TouchInput,
     asr_tx: &std::sync::mpsc::Sender<audio::AsrRequest>,
     asr_config: Option<audio::AsrConfig>,
     display_text: &str,
 ) -> anyhow::Result<Option<String>> {
     let Some(config) = asr_config else {
-        wait_touch_release(touch_rx).await;
+        touch.wait_release().await;
         return Err(anyhow::anyhow!("ASR not configured"));
     };
 
@@ -968,7 +932,7 @@ async fn record_asr_once(
     let _ = gui.show_asr_editor(display_text, "Connecting...").await;
 
     if asr_tx.send(req).is_err() {
-        wait_touch_release(touch_rx).await;
+        touch.wait_release().await;
         return Err(anyhow::anyhow!("ASR unavailable"));
     }
 
@@ -986,12 +950,12 @@ async fn record_asr_once(
             response = &mut result => {
                 break response.unwrap_or_else(|_| Err(anyhow::anyhow!("ASR worker dropped request")));
             }
-            event = touch_rx.recv() => {
-                match event {
-                    Some(lcd::TouchEvent::Press(touch)) if is_asr_touch(touch) => {}
-                    Some(lcd::TouchEvent::Release(_)) | Some(lcd::TouchEvent::Press(_)) | None => {
-                        cancel.store(true, Ordering::Relaxed);
-                    }
+            gesture = touch.next_gesture() => {
+                match gesture {
+                    Some(touch::TouchGesture::Press { point }) if is_asr_touch(point) => {}
+                    Some(touch::TouchGesture::LongPress { start, end, .. })
+                        if is_asr_touch(start) && is_asr_touch(end) => {}
+                    Some(_) | None => cancel.store(true, Ordering::Relaxed),
                 }
             }
             ev = server.recv() => {
@@ -1009,7 +973,7 @@ async fn record_asr_once(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TopAsrAction {
     Left,
     Delete,
@@ -1097,23 +1061,23 @@ impl TouchAsrEditor {
 async fn wait_top_asr_action(
     server: &mut MqttServer,
     gui: &mut UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    touch: &mut touch::TouchInput,
     action: TopAsrAction,
     editor: &mut TouchAsrEditor,
     hint: &str,
 ) -> anyhow::Result<()> {
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(180));
-    interval.tick().await;
     loop {
         tokio::select! {
-            _ = interval.tick() => {
-                apply_top_asr_action(action, editor);
-                let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
-            }
-            event = touch_rx.recv() => {
-                match event {
-                    Some(lcd::TouchEvent::Release(_)) | None => return Ok(()),
-                    Some(lcd::TouchEvent::Press(_)) => {}
+            gesture = touch.next_gesture() => {
+                match gesture {
+                    Some(touch::TouchGesture::LongPress { start, end, .. })
+                        if top_asr_action(start) == Some(action) && top_asr_action(end) == Some(action) =>
+                    {
+                        apply_top_asr_action(action, editor);
+                        let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
+                    }
+                    Some(touch::TouchGesture::Press { .. }) => {}
+                    Some(_) | None => return Ok(()),
                 }
             }
             ev = server.recv() => {
@@ -1168,32 +1132,10 @@ fn is_asr_touch(touch: lcd::TouchPoint) -> bool {
     touch.y > lcd::LCD_HEIGHT.saturating_sub(80)
 }
 
-fn is_back_swipe(start: lcd::TouchPoint, end: lcd::TouchPoint) -> bool {
-    let dx = end.x as i32 - start.x as i32;
-    let dy = (end.y as i32 - start.y as i32).abs();
-    dx >= TOUCH_SWIPE_THRESHOLD_PX && dy <= TOUCH_SWIPE_THRESHOLD_PX
-}
-
-async fn wait_touch_release(touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>) {
-    loop {
-        tokio::select! {
-            event = touch_rx.recv() => {
-                match event {
-                    Some(lcd::TouchEvent::Release(_)) | None => break,
-                    Some(lcd::TouchEvent::Press(_)) => {}
-                }
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
-                break;
-            }
-        }
-    }
-}
-
 async fn show_idle_shutdown_prompt(
     server: &mut MqttServer,
     gui: &mut UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<lcd::TouchEvent>,
+    touch: &mut touch::TouchInput,
 ) -> anyhow::Result<bool> {
     let cancel_rect = Rectangle::new(
         Point::new(40, lcd::LCD_HEIGHT as i32 - 132),
@@ -1209,7 +1151,6 @@ async fn show_idle_shutdown_prompt(
     let mut remaining = IDLE_SHUTDOWN_COUNTDOWN_SECS;
     let mut title = idle_shutdown_title(remaining);
     let item_rects = gui.display_list(&title, &items).await?;
-    let mut press_index = None;
     let mut next_tick = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
 
     loop {
@@ -1226,21 +1167,17 @@ async fn show_idle_shutdown_prompt(
                 title = idle_shutdown_title(remaining);
                 gui.refresh_list_title(&title).await?;
             }
-            event = touch_rx.recv() => {
-                match event {
-                    Some(lcd::TouchEvent::Press(touch)) => {
-                        if press_index.is_none() {
-                            press_index = crate::ui::list_touch_index(touch, &item_rects);
-                        }
-                    }
-                    Some(lcd::TouchEvent::Release(touch)) => {
-                        let release_index = crate::ui::list_touch_index(touch, &item_rects);
+            gesture = touch.next_gesture() => {
+                match gesture {
+                    Some(touch::TouchGesture::Click { start, end }) => {
+                        let press_index = crate::ui::list_touch_index(start, &item_rects);
+                        let release_index = crate::ui::list_touch_index(end, &item_rects);
                         if press_index.is_some() && press_index == release_index {
                             log::info!("Idle shutdown cancelled");
                             return Ok(true);
                         }
-                        press_index = None;
                     }
+                    Some(_) => {}
                     None => return Ok(true),
                 }
             }

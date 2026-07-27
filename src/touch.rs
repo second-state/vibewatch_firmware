@@ -86,20 +86,8 @@ impl TouchInput {
         }
     }
 
-    pub fn receiver_mut(&mut self) -> &mut tokio::sync::mpsc::Receiver<TouchEvent> {
-        &mut self.rx
-    }
-
     pub fn cancel_active_gesture(&mut self) {
         self.active = None;
-    }
-
-    pub fn into_inner(self) -> tokio::sync::mpsc::Receiver<TouchEvent> {
-        self.rx
-    }
-
-    pub async fn recv_raw(&mut self) -> Option<TouchEvent> {
-        self.rx.recv().await
     }
 
     pub async fn next_gesture(&mut self) -> Option<TouchGesture> {

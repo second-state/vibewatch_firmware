@@ -183,7 +183,7 @@ fn main() -> anyhow::Result<()> {
         setting.server_url,
         client_id,
         &mut gui,
-        touch.into_inner(),
+        touch,
         boot_button,
         asr_tx,
         asr_config.as_ref(),
