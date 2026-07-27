@@ -17,8 +17,6 @@ mod touch;
 mod ui;
 mod util;
 
-const USE_NEW_REMOTE_UI: bool = true;
-
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
@@ -181,33 +179,18 @@ fn main() -> anyhow::Result<()> {
         log::error!("Failed to spawn ASR worker thread: {e:?}");
     }
 
-    let r = if USE_NEW_REMOTE_UI {
-        runtime.block_on(remote::run_(
-            setting.server_url,
-            client_id,
-            &mut gui,
-            touch.into_inner(),
-            boot_button,
-            asr_tx,
-            asr_config.as_ref(),
-            audio_prompt_player.as_ref(),
-            audio_prompt_enabled,
-            &nvs,
-        ))
-    } else {
-        runtime.block_on(remote::run(
-            setting.server_url,
-            client_id,
-            &mut gui,
-            touch.into_inner(),
-            boot_button,
-            asr_tx,
-            asr_config.as_ref(),
-            audio_prompt_player.as_ref(),
-            audio_prompt_enabled,
-            &nvs,
-        ))
-    };
+    let r = runtime.block_on(remote::run(
+        setting.server_url,
+        client_id,
+        &mut gui,
+        touch.into_inner(),
+        boot_button,
+        asr_tx,
+        asr_config.as_ref(),
+        audio_prompt_player.as_ref(),
+        audio_prompt_enabled,
+        &nvs,
+    ));
     log::info!("remote exited: {:?}", r);
 
     let mut gui = ui::UI::default();

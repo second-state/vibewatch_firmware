@@ -355,7 +355,6 @@ const TERMINAL_APPEND_RENDER_TIMEOUT: std::time::Duration = std::time::Duration:
 fn build_version_label() -> &'static str {
     option_env!("VIBEKEYS_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
-const TERMINAL_SCROLL_ROWS: usize = 10;
 const TERMINAL_SCROLLBACK_ROWS: usize = 16;
 static TERMINAL_THEME_INDEX: AtomicUsize = AtomicUsize::new(0);
 static TERMINAL_TEXT_CELLS: OnceLock<(u16, u16)> = OnceLock::new();
@@ -557,11 +556,6 @@ pub enum SettingMenuSelection {
     Ota,
     Ble,
     Back,
-}
-
-pub enum TerminalScroll {
-    Up,
-    Down,
 }
 
 pub struct UI {
@@ -1147,40 +1141,6 @@ impl UI {
             dirty
         );
         Ok(dirty.is_some())
-    }
-
-    pub async fn scroll_terminal_text(
-        &mut self,
-        direction: TerminalScroll,
-    ) -> anyhow::Result<bool> {
-        self.terminal.append_render_deadline = None;
-        let Some(session) = self.terminal.session.as_mut() else {
-            return Ok(false);
-        };
-        let parser = &mut session.parser;
-        let before = parser.screen().scrollback();
-        let next = match direction {
-            TerminalScroll::Up => before.saturating_add(TERMINAL_SCROLL_ROWS),
-            TerminalScroll::Down => before.saturating_sub(TERMINAL_SCROLL_ROWS),
-        };
-        parser.screen_mut().set_scrollback(next);
-        let after = parser.screen().scrollback();
-        if after == before {
-            return Ok(false);
-        }
-
-        log::info!("local text scroll: {before} -> {after}");
-        let dirty = session
-            .renderer
-            .render_diff(parser.screen(), self.display.as_mut())?;
-        log::info!(
-            "local text scroll cache_len={}",
-            session.renderer.cache_len()
-        );
-        if let Some(rect) = dirty {
-            let _ = self.flush_terminal_dirty(rect).await?;
-        }
-        Ok(true)
     }
 
     pub async fn redraw_cached_terminal_text(&mut self) -> anyhow::Result<bool> {
