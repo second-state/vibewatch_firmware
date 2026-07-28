@@ -433,14 +433,13 @@ impl MqttServer {
                     .map_err(|e| anyhow::anyhow!("publish pty_in failed: {e:?}"))?;
             }
             other => {
+                let qos = match other {
+                    ClientMessage::Input(_) => QoS::ExactlyOnce,
+                    _ => QoS::AtLeastOnce,
+                };
                 let json = other.to_json()?;
                 self.client
-                    .publish(
-                        &format!("{prefix}/control"),
-                        QoS::AtLeastOnce,
-                        false,
-                        json.as_bytes(),
-                    )
+                    .publish(&format!("{prefix}/control"), qos, false, json.as_bytes())
                     .map_err(|e| anyhow::anyhow!("publish control failed: {e:?}"))?;
             }
         }
