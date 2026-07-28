@@ -86,7 +86,38 @@ pub async fn run(
     let mut session_list_off_since = None;
 
     loop {
-        server.flush_pending().await?;
+        if let Err(e) = server.flush_pending().await {
+            recover_mqtt_error_(
+                "subscribe screen",
+                e,
+                &mut state,
+                &mut server,
+                gui,
+                &mut render_state,
+            )
+            .await?;
+            render_requested = false;
+            session_list_off_since = None;
+            last_session_list_change = tokio::time::Instant::now();
+            continue;
+        }
+        if server.is_connected() {
+            if state.exit_mqtt_reconnecting() {
+                execute_simple_effect_(
+                    app::Effect::SetBacklight(app::BacklightState::Normal),
+                    &mut server,
+                    &mut backlight,
+                )
+                .await?;
+                render_requested = true;
+                session_list_off_since = None;
+                last_session_list_change = tokio::time::Instant::now();
+            }
+        } else if state.enter_mqtt_reconnecting() {
+            render_requested = true;
+            session_list_off_since = None;
+            last_session_list_change = tokio::time::Instant::now();
+        }
         if render_requested {
             state.render(gui, &mut render_state).await?;
             render_requested = false;
@@ -112,6 +143,12 @@ pub async fn run(
                 if let Err(e) = gui.render_pending_terminal_append().await {
                     log::warn!("render pending terminal append failed: {e:?}");
                 }
+            }
+            // MQTT 断线重连提示的点号动画。
+            _ = tokio::time::sleep_until(render_state.next_mqtt_reconnect_refresh), if state.is_mqtt_reconnecting() && backlight != BacklightMode::Off => {
+                render_state.next_mqtt_reconnect_refresh =
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+                render_requested = state.tick_mqtt_reconnecting();
             }
             // 定时刷新 session list 标题里的电量。
             _ = tokio::time::sleep_until(render_state.next_title_refresh), if state.route == app::Route::SessionPicker && backlight != BacklightMode::Off => {
@@ -296,8 +333,10 @@ async fn handle_app_event_result_(
     for effect in result.effects {
         if execute_app_effect_(
             effect,
+            state,
             server,
             gui,
+            render_state,
             touch,
             backlight,
             asr_tx,
@@ -318,8 +357,10 @@ async fn handle_app_event_result_(
 #[allow(clippy::too_many_arguments)]
 async fn execute_app_effect_(
     effect: app::Effect,
+    state: &mut app::AppState,
     server: &mut MqttServer,
     gui: &mut UI,
+    render_state: &mut app::AppRenderState,
     touch: &mut touch::TouchInput,
     backlight: &mut BacklightMode,
     asr_tx: &std::sync::mpsc::Sender<audio::AsrRequest>,
@@ -332,12 +373,18 @@ async fn execute_app_effect_(
     match effect {
         app::Effect::SelectSession(prefix) => {
             server.set_active(&prefix);
-            server.flush_pending().await?;
+            if let Err(e) = server.flush_pending().await {
+                recover_mqtt_error_("subscribe screen", e, state, server, gui, render_state)
+                    .await?;
+            }
         }
         app::Effect::ClearActiveSession => {
             gui.cancel_pending_terminal_append();
             server.clear_active();
-            server.flush_pending().await?;
+            if let Err(e) = server.flush_pending().await {
+                recover_mqtt_error_("unsubscribe screen", e, state, server, gui, render_state)
+                    .await?;
+            }
         }
         app::Effect::OpenBootMenu => {
             log::info!("new UI opening BOOT menu");
@@ -393,10 +440,46 @@ async fn execute_app_effect_(
             let label = gui.set_terminal_theme(index);
             log::info!("Terminal theme selected by effect: {label}");
         }
+        app::Effect::MqttPublish(command) => {
+            if let Err(e) = execute_mqtt_command_(command, server).await {
+                recover_mqtt_error_("send data", e, state, server, gui, render_state).await?;
+            }
+        }
         other => execute_simple_effect_(other, server, backlight).await?,
     }
 
     Ok(render_after_effect)
+}
+
+async fn recover_mqtt_error_(
+    context: &str,
+    error: anyhow::Error,
+    state: &mut app::AppState,
+    server: &mut MqttServer,
+    gui: &mut UI,
+    render_state: &mut app::AppRenderState,
+) -> anyhow::Result<()> {
+    log::warn!("Recovering from MQTT {context} error: {error:?}");
+    gui.show_status("MQTT error", format!("{context}\n{error:?}"))
+        .await
+        .ok();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    gui.cancel_pending_terminal_append();
+    server.clear_active();
+    if let Err(e) = server.flush_pending().await {
+        log::warn!("Ignoring MQTT cleanup error after {context} failure: {e:?}");
+    }
+
+    if server.is_connected() {
+        state.exit_mqtt_reconnecting();
+        state.return_to_session_picker();
+        let _ = sync_sessions_(state, server);
+    } else {
+        state.enter_mqtt_reconnecting();
+    }
+    state.render(gui, render_state).await?;
+    Ok(())
 }
 
 fn sync_sessions_(state: &mut app::AppState, server: &MqttServer) -> app::SessionSyncResult {
@@ -456,33 +539,22 @@ async fn execute_mqtt_command_(
 ) -> anyhow::Result<()> {
     match command {
         app::MqttCommand::SendSync { close } => {
-            if let Err(e) = send_active_sync(server, close).await {
-                log::warn!("Ignoring sync after active session disappeared: {e:?}");
-            }
+            send_active_sync(server, close).await?;
         }
         app::MqttCommand::SendKey { key } => {
-            if let Err(e) = server
+            server
                 .send(protocol::ClientMessage::pty_input_str(&key))
-                .await
-            {
-                log::warn!("Ignoring key send after active session disappeared: {e:?}");
-            }
+                .await?;
         }
         app::MqttCommand::SendScrollUp { rows } => {
-            if let Err(e) = server
+            server
                 .send(protocol::ClientMessage::ScrollUp { rows })
-                .await
-            {
-                log::warn!("Ignoring scroll-up after active session disappeared: {e:?}");
-            }
+                .await?;
         }
         app::MqttCommand::SendScrollDown { rows } => {
-            if let Err(e) = server
+            server
                 .send(protocol::ClientMessage::ScrollDown { rows })
-                .await
-            {
-                log::warn!("Ignoring scroll-down after active session disappeared: {e:?}");
-            }
+                .await?;
         }
         app::MqttCommand::Publish { topic, .. } => {
             log::warn!("new UI raw publish effect not implemented yet: {topic}");
@@ -651,6 +723,7 @@ async fn select_terminal_theme(
             }
             ev = server.recv() => {
                 match ev {
+                    Some(MqttEvent::Connected) | Some(MqttEvent::Disconnected) => {}
                     Some(MqttEvent::Presence { .. }) => {}
                     Some(MqttEvent::ActiveScreen(_)) | Some(MqttEvent::ActiveText(_)) => {}
                     None => return Ok(None),
@@ -777,6 +850,7 @@ async fn select_screen_menu_item(
             }
             ev = server.recv() => {
                 match ev {
+                    Some(MqttEvent::Connected) | Some(MqttEvent::Disconnected) => {}
                     Some(MqttEvent::Presence { .. }) => {}
                     Some(MqttEvent::ActiveScreen(_)) | Some(MqttEvent::ActiveText(_)) => {}
                     None => return Err(anyhow::anyhow!("MQTT event source closed during screen menu")),
@@ -815,6 +889,7 @@ async fn select_remote_list_item(
             }
             ev = server.recv() => {
                 match ev {
+                    Some(MqttEvent::Connected) | Some(MqttEvent::Disconnected) => {}
                     Some(MqttEvent::Presence { .. }) => {}
                     Some(MqttEvent::ActiveScreen(_)) | Some(MqttEvent::ActiveText(_)) => {}
                     None => return Err(anyhow::anyhow!("MQTT event source closed during custom menu")),
@@ -1187,6 +1262,7 @@ async fn show_idle_shutdown_prompt(
             }
             ev = server.recv() => {
                 match ev {
+                    Some(MqttEvent::Connected) | Some(MqttEvent::Disconnected) => return Ok(true),
                     Some(MqttEvent::Presence { list_changed, .. }) => {
                         if list_changed
                             && !server

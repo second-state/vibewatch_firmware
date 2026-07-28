@@ -43,6 +43,10 @@ pub struct MqttServer {
     client: EspMqttClient<'static>,
     /// 回调 → app_fut 的事件队列。
     rx: mpsc::UnboundedReceiver<RawEvent>,
+    /// discovery 订阅目标,重连后需要重新订阅。
+    discovery_topic: String,
+    /// 最后一次从 MQTT callback 观察到的连接状态。
+    connected: bool,
     /// 会话注册表:presence 公告得到的 prefix -> 会话元信息。
     sessions: HashMap<String, Session>,
     /// 用户选定的活跃会话(= screen 订阅目标 = input 发送目标)。
@@ -68,6 +72,8 @@ struct Session {
 
 /// `recv()` 上报给 app 的事件。
 pub enum MqttEvent {
+    Connected,
+    Disconnected,
     /// 活跃会话的 screen 组装完成,交给 UI 显示。
     ActiveScreen(ScreenImageChunk),
     /// 活跃会话的 screen_text:首字节 tag + ANSI 终端流。
@@ -236,6 +242,8 @@ impl MqttServer {
         Ok(Self {
             client,
             rx,
+            discovery_topic: discovery,
+            connected: true,
             sessions: HashMap::new(),
             active: None,
             subscribed_screen_topic: None,
@@ -246,6 +254,10 @@ impl MqttServer {
     /// 把 `active` 落实为 screen 订阅。回调式客户端下 subscribe/unsubscribe 是同步调用,
     /// 不再需要像旧 async 客户端那样并发排水 conn 事件。
     pub async fn flush_pending(&mut self) -> anyhow::Result<()> {
+        if !self.connected {
+            log::debug!("Skipping screen subscription while MQTT disconnected");
+            return Ok(());
+        }
         let next_subscription = self.active.as_ref().and_then(|prefix| {
             self.sessions.get(prefix).map(|s| {
                 (
@@ -280,14 +292,28 @@ impl MqttServer {
         Ok(())
     }
 
-    /// 阻塞等待下一条需要 app 处理的事件(连接 / 断开在内部消化)。
+    /// 阻塞等待下一条需要 app 处理的事件。
     /// 返回 `None` 表示事件队列已关闭(client 已销毁)。
     pub async fn recv(&mut self) -> Option<MqttEvent> {
         loop {
             // 从 tokio channel 取一条已拷成 owned 的事件。
             let (topic, data, details) = match self.rx.recv().await? {
-                RawEvent::Connected => continue,
-                RawEvent::Disconnected => continue,
+                RawEvent::Connected => {
+                    self.connected = true;
+                    log::info!("MQTT connected event received, resubscribing discovery");
+                    if let Err(e) = self
+                        .client
+                        .subscribe(&self.discovery_topic, QoS::AtLeastOnce)
+                    {
+                        log::warn!("resubscribe discovery failed after MQTT reconnect: {e:?}");
+                    }
+                    return Some(MqttEvent::Connected);
+                }
+                RawEvent::Disconnected => {
+                    self.connected = false;
+                    self.clear_runtime_state();
+                    return Some(MqttEvent::Disconnected);
+                }
                 RawEvent::Received {
                     topic,
                     data,
@@ -494,8 +520,19 @@ impl MqttServer {
         self.active = None;
     }
 
+    fn clear_runtime_state(&mut self) {
+        self.sessions.clear();
+        self.active = None;
+        self.subscribed_screen_topic = None;
+        self.reassembly.clear();
+    }
+
     pub fn has_active_session(&self) -> bool {
         self.active.is_some()
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.connected
     }
 
     pub fn active_uses_text_screen(&self) -> bool {

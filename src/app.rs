@@ -40,6 +40,8 @@ pub struct SessionListState {
     pub items: Vec<SessionPickerItem>,
     pub scroll_offset: usize,
     pub loading: bool,
+    pub reconnecting: bool,
+    pub reconnect_dots: usize,
     pub boot_long_press_count: u8,
 }
 
@@ -176,6 +178,7 @@ impl AppEventResult {
 pub struct AppRenderState {
     pub session_item_rects: Vec<Rectangle>,
     pub next_title_refresh: tokio::time::Instant,
+    pub next_mqtt_reconnect_refresh: tokio::time::Instant,
 }
 
 pub struct SessionSyncResult {
@@ -189,6 +192,8 @@ impl AppRenderState {
         Self {
             session_item_rects: Vec::new(),
             next_title_refresh: tokio::time::Instant::now() + crate::ui::MENU_TITLE_REFRESH_DELAY,
+            next_mqtt_reconnect_refresh: tokio::time::Instant::now()
+                + std::time::Duration::from_secs(1),
         }
     }
 }
@@ -249,6 +254,9 @@ impl AppState {
     }
 
     pub fn set_session_title(&mut self, title: String) -> bool {
+        if self.sessions.reconnecting {
+            return false;
+        }
         if self.sessions.title == title {
             return false;
         }
@@ -262,6 +270,55 @@ impl AppState {
 
     pub fn request_render_for_current_route(&self) -> bool {
         matches!(self.route, Route::SessionPicker | Route::ActiveSession)
+    }
+
+    pub fn is_mqtt_reconnecting(&self) -> bool {
+        self.route == Route::SessionPicker && self.sessions.reconnecting
+    }
+
+    pub fn tick_mqtt_reconnecting(&mut self) -> bool {
+        if !self.is_mqtt_reconnecting() {
+            return false;
+        }
+        self.sessions.reconnect_dots = (self.sessions.reconnect_dots + 1) % 3;
+        true
+    }
+
+    pub fn enter_mqtt_reconnecting(&mut self) -> bool {
+        let changed = !self.sessions.reconnecting
+            || self.route != Route::SessionPicker
+            || !self.sessions.items.is_empty();
+        self.route = Route::SessionPicker;
+        self.sessions.title.clear();
+        self.sessions.items.clear();
+        self.sessions.scroll_offset = 0;
+        self.sessions.reconnecting = true;
+        self.sessions.reconnect_dots = 0;
+        self.active_session.loading = false;
+        changed
+    }
+
+    pub fn exit_mqtt_reconnecting(&mut self) -> bool {
+        if !self.sessions.reconnecting {
+            return false;
+        }
+        self.route = Route::SessionPicker;
+        self.sessions.reconnecting = false;
+        self.sessions.reconnect_dots = 0;
+        self.active_session.loading = false;
+        true
+    }
+
+    pub fn return_to_session_picker(&mut self) {
+        self.route = Route::SessionPicker;
+        self.active_session.loading = false;
+        self.active_session.backspace_overlay = false;
+        self.active_session.menu_overlay = false;
+        self.active_session.clear_overlay = false;
+        self.active_session.backspace_hold_sent = false;
+        self.active_session.last_backspace_sent_at = None;
+        self.active_session.pending_text_frame = None;
+        self.active_session.pending_screen_chunk = None;
     }
 
     pub fn handle_event(
@@ -533,16 +590,37 @@ impl AppState {
     fn handle_mqtt_event(&mut self, event: MqttEvent) -> AppEventResult {
         match event {
             MqttEvent::ActiveScreen(chunk) => {
+                if self.sessions.reconnecting {
+                    return AppEventResult::none();
+                }
                 self.route = Route::ActiveSession;
                 self.active_session.loading = false;
                 self.active_session.pending_screen_chunk = Some(chunk);
                 AppEventResult::render()
             }
             MqttEvent::ActiveText(frame) => {
+                if self.sessions.reconnecting {
+                    return AppEventResult::none();
+                }
                 self.route = Route::ActiveSession;
                 self.active_session.loading = false;
                 self.active_session.pending_text_frame = Some(frame);
                 AppEventResult::render()
+            }
+            MqttEvent::Connected => {
+                log::info!("new UI MQTT connected; returning to session list");
+                let render = self.exit_mqtt_reconnecting();
+                AppEventResult {
+                    render,
+                    effects: vec![Effect::SetBacklight(BacklightState::Normal)],
+                }
+            }
+            MqttEvent::Disconnected => {
+                log::warn!("new UI MQTT disconnected; showing reconnecting state");
+                AppEventResult {
+                    render: self.enter_mqtt_reconnecting(),
+                    effects: Vec::new(),
+                }
             }
             MqttEvent::Presence {
                 prefix,
@@ -617,6 +695,12 @@ impl AppState {
         render_state: &mut AppRenderState,
     ) -> anyhow::Result<()> {
         gui.cancel_pending_terminal_append();
+        if self.sessions.reconnecting {
+            let dots = ".".repeat(self.sessions.reconnect_dots + 1);
+            gui.show_status(format!("Reconnect MQTT{dots}"), "").await?;
+            render_state.session_item_rects.clear();
+            return Ok(());
+        }
         if self.sessions.items.is_empty() {
             gui.show_status("no session", "").await?;
             render_state.session_item_rects.clear();
