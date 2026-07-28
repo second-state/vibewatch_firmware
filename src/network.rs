@@ -16,6 +16,8 @@ const DEFAULT_SNTP_SERVERS: [&str; 4] = [
 ];
 const TIMEZONE_BY_IP_URL: &str =
     "http://ip-api.com/json/?fields=status,message,timezone,offset,query";
+const TIMEZONE_BY_IP_ATTEMPTS: usize = 3;
+const TIMEZONE_BY_IP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 const HTTP_DATE_SYNC_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(15);
 const TIME_SYNC_STATUS_HOLD: std::time::Duration = std::time::Duration::from_millis(2000);
 
@@ -243,8 +245,7 @@ async fn sync_timezone_from_ip(
     gui: &mut crate::ui::UI,
     nvs: &mut esp_idf_svc::nvs::EspDefaultNvs,
 ) -> anyhow::Result<TimezoneSyncResult> {
-    gui.show_status("Sync timezone...", "").await.ok();
-    let result = fetch_timezone_from_ip()?;
+    let result = fetch_timezone_from_ip_with_retry(gui).await?;
     let timezone = &result.timezone;
     if timezone.status != "success" {
         anyhow::bail!(
@@ -271,6 +272,33 @@ async fn sync_timezone_from_ip(
     .ok();
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
     Ok(result)
+}
+
+async fn fetch_timezone_from_ip_with_retry(
+    gui: &mut crate::ui::UI,
+) -> anyhow::Result<TimezoneSyncResult> {
+    let mut last_error = None;
+    for attempt in 1..=TIMEZONE_BY_IP_ATTEMPTS {
+        gui.show_status(
+            "Sync timezone...",
+            format!("Attempt {attempt}/{TIMEZONE_BY_IP_ATTEMPTS}"),
+        )
+        .await
+        .ok();
+        match fetch_timezone_from_ip() {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                warn!("Timezone by IP request failed ({attempt}/{TIMEZONE_BY_IP_ATTEMPTS}): {e:?}");
+                last_error = Some(e);
+                if attempt < TIMEZONE_BY_IP_ATTEMPTS {
+                    tokio::time::sleep(TIMEZONE_BY_IP_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| anyhow::anyhow!("timezone by IP request failed without error")))
 }
 
 fn fetch_timezone_from_ip() -> anyhow::Result<TimezoneSyncResult> {
