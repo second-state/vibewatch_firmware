@@ -872,7 +872,6 @@ async fn run_touch_asr(
                             Some(AsrEditorSwipe::Send) => {
                                 let text = editor.take_trimmed();
                                 if !text.is_empty() {
-                                    let text_mode = server.active_uses_text_screen();
                                     if let Err(e) =
                                         server.send(protocol::ClientMessage::Input(text)).await
                                     {
@@ -881,19 +880,15 @@ async fn run_touch_asr(
                                         );
                                         return Ok(());
                                     }
-                                    if text_mode {
-                                        if let Err(e) = gui.redraw_cached_terminal_text().await {
-                                            log::warn!("redraw cached terminal text failed: {e:?}");
-                                        }
-                                        return Ok(());
-                                    }
+                                    redraw_active_cached_screen(server, gui).await?;
+                                    return Ok(());
                                 }
-                                send_active_sync(server, false).await?;
+                                redraw_active_cached_screen(server, gui).await?;
                                 return Ok(());
                             }
                             Some(AsrEditorSwipe::Cancel) => {
                                 log::info!("ASR editor canceled");
-                                send_active_sync(server, false).await?;
+                                redraw_active_cached_screen(server, gui).await?;
                                 return Ok(());
                             }
                             None => {}
