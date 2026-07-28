@@ -1270,6 +1270,10 @@ impl UI {
         self.terminal.append_render_deadline
     }
 
+    pub fn cancel_pending_terminal_append(&mut self) {
+        self.terminal.append_render_deadline = None;
+    }
+
     pub async fn render_pending_terminal_append(&mut self) -> anyhow::Result<bool> {
         if self.terminal.append_render_deadline.is_none() {
             return Ok(false);

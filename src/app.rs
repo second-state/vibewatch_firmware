@@ -600,6 +600,7 @@ impl AppState {
         gui: &mut UI,
         render_state: &mut AppRenderState,
     ) -> anyhow::Result<()> {
+        gui.cancel_pending_terminal_append();
         if self.sessions.items.is_empty() {
             gui.show_status("no session", "").await?;
             render_state.session_item_rects.clear();

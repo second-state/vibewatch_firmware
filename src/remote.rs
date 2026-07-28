@@ -96,7 +96,11 @@ pub async fn run(
         let session_shutdown_at = session_list_off_since
             .map(|instant| instant + SESSION_LIST_OFF_SHUTDOWN_PROMPT_DELAY)
             .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(3600));
-        let terminal_append_render_at = gui.terminal_append_render_deadline();
+        let terminal_append_render_at = if state.route == app::Route::ActiveSession {
+            gui.terminal_append_render_deadline()
+        } else {
+            None
+        };
 
         tokio::select! {
             // 固定窗口合并 terminal append，到点渲染一次。
@@ -328,6 +332,7 @@ async fn execute_app_effect_(
             server.flush_pending().await?;
         }
         app::Effect::ClearActiveSession => {
+            gui.cancel_pending_terminal_append();
             server.clear_active();
             server.flush_pending().await?;
         }
@@ -421,6 +426,7 @@ async fn execute_simple_effect_(
             server.flush_pending().await?;
         }
         app::Effect::ClearActiveSession => {
+            // Returning to the picker must not flush buffered terminal output over the list.
             server.clear_active();
             server.flush_pending().await?;
         }
