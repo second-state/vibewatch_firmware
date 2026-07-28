@@ -26,8 +26,9 @@ fn main() -> anyhow::Result<()> {
     let sysloop = EspSystemEventLoop::take()?;
     let _fs = esp_idf_svc::io::vfs::MountedEventfs::mount(20)?;
     let partition = esp_idf_svc::nvs::EspDefaultNvsPartition::take()?;
-    let nvs = esp_idf_svc::nvs::EspDefaultNvs::new(partition, "setting", true)?;
+    let mut nvs = esp_idf_svc::nvs::EspDefaultNvs::new(partition, "setting", true)?;
     let setting = setting::Setting::load_from_nvs(&nvs)?;
+    ui::set_clock_utc_offset_secs(setting.timezone_offset_secs);
     let asr_config = audio::AsrConfig::load_from_nvs(&nvs);
     let audio_prompt = audio::Prompt::load_from_nvs(&nvs);
     let audio_prompt_enabled = audio::prompt_enabled(&nvs);
@@ -42,7 +43,7 @@ fn main() -> anyhow::Result<()> {
     let (touch_tx, touch_rx) = tokio::sync::mpsc::channel::<lcd::TouchEvent>(16);
     lcd::start_touch_worker(touch_tx)?;
     let mut touch = touch::TouchInput::new(touch_rx);
-    let boot_button = boot::new_boot_button(peripherals.pins.gpio0.into())?;
+    let mut boot_button = boot::new_boot_button(peripherals.pins.gpio0.into())?;
     lcd::set_backlight(30)?;
     power::init()?;
     power::start_power_key_worker();
@@ -87,13 +88,27 @@ fn main() -> anyhow::Result<()> {
         restart();
     }
 
-    let mode =
+    let mut wifi = network::WifiManager::new(peripherals.modem, sysloop)?;
+
+    let mode = 'home: loop {
+        runtime.block_on(ui::clock_screen(&mut gui, &mut touch, &mut boot_button))?;
         loop {
             match runtime.block_on(ui::main_menu(&mut gui, &mut touch))? {
-                ui::MainMenuSelection::Remote => break ui::MainMenuSelection::Remote,
+                ui::MainMenuSelection::Clock => continue 'home,
+                ui::MainMenuSelection::Remote => break 'home ui::MainMenuSelection::Remote,
                 ui::MainMenuSelection::Setting => {
                     match runtime.block_on(ui::setting_menu(&mut gui, &mut touch))? {
-                        ui::SettingMenuSelection::Ota => break ui::MainMenuSelection::Setting,
+                        ui::SettingMenuSelection::Ota => {
+                            break 'home ui::MainMenuSelection::Setting;
+                        }
+                        ui::SettingMenuSelection::SyncTime => {
+                            runtime
+                                .block_on(sync_time_from_settings(
+                                    &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
+                                ))
+                                .ok();
+                            continue;
+                        }
                         ui::SettingMenuSelection::Ble => {
                             runtime
                                 .block_on(gui.show_status(
@@ -111,16 +126,14 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-        };
+        }
+    };
     match mode {
+        ui::MainMenuSelection::Clock => unreachable!(),
         ui::MainMenuSelection::Remote => {}
         ui::MainMenuSelection::Setting => {
             runtime.block_on(ota::run(
-                peripherals.modem,
-                sysloop,
-                &setting,
-                &mut gui,
-                &mut touch,
+                &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
             ))?;
             return Ok(());
         }
@@ -131,17 +144,18 @@ fn main() -> anyhow::Result<()> {
         .block_on(gui.show_status("Connecting WiFi...", ""))
         .ok();
 
-    let wifi = network::wifi_connect(peripherals.modem, sysloop, &setting.wifi_list);
-    if let Err(e) = wifi.as_ref() {
+    let wifi_result = wifi.connect(&setting.wifi_list);
+    if let Err(e) = wifi_result.as_ref() {
         runtime
             .block_on(gui.show_status("WiFi failed", format!("{e:?}\nReset in 5s...")))
             .ok();
         std::thread::sleep(std::time::Duration::from_secs(5));
         restart();
     }
-    let _wifi = wifi.unwrap();
     log::info!("WiFi connected");
-    runtime.block_on(network::sync_time_with_ui(&mut gui, &mut touch))?;
+    runtime.block_on(network::sync_time_and_timezone_with_ui(
+        &mut gui, &mut touch, &mut nvs,
+    ))?;
 
     // Remote:MQTT 连 vibetty → 进入 session list(停留等输入选会话)
     runtime
@@ -199,6 +213,42 @@ fn main() -> anyhow::Result<()> {
         .ok();
     std::thread::sleep(std::time::Duration::from_secs(5));
     restart();
+}
+
+async fn sync_time_from_settings(
+    wifi: &mut network::WifiManager,
+    setting: &setting::Setting,
+    gui: &mut ui::UI,
+    touch: &mut touch::TouchInput,
+    nvs: &mut esp_idf_svc::nvs::EspDefaultNvs,
+) -> anyhow::Result<()> {
+    gui.show_status("Sync Time", "Connecting WiFi...")
+        .await
+        .ok();
+    match wifi.connect(&setting.wifi_list) {
+        Ok(()) => {
+            let result = network::sync_time_and_timezone_with_ui(gui, touch, nvs).await;
+            wifi.disconnect_and_stop();
+            match result {
+                Ok(()) => {
+                    gui.show_status("Sync Time", "Done").await.ok();
+                    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                    Ok(())
+                }
+                Err(e) => {
+                    gui.show_status("Sync Time", format!("{e:?}")).await.ok();
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    Err(e)
+                }
+            }
+        }
+        Err(e) => {
+            wifi.disconnect_and_stop();
+            gui.show_status("WiFi failed", format!("{e:?}")).await.ok();
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            Err(e)
+        }
+    }
 }
 
 /// 用 WiFi STA MAC 生成 broker 内唯一的 MQTT client_id(esp_read_mac 直接读 efuse)。

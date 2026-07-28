@@ -1,7 +1,6 @@
 //! OTA mode used by the main firmware Settings menu.
 
 use esp_idf_svc::{
-    eventloop::EspSystemEventLoop,
     hal::reset::restart,
     http::server::{Configuration as HttpServerConf, EspHttpServer, Method},
     io::Write,
@@ -32,20 +31,16 @@ enum OtaEvent {
     DownloadLatest,
 }
 
-pub async fn run<M>(
-    modem: M,
-    sysloop: EspSystemEventLoop,
+pub async fn run(
+    wifi: &mut crate::network::WifiManager,
     setting: &crate::setting::Setting,
     gui: &mut crate::ui::UI,
     touch: &mut crate::touch::TouchInput,
-) -> anyhow::Result<()>
-where
-    M: esp_idf_svc::hal::modem::WifiModemPeripheral + 'static,
-{
+    nvs: &mut esp_idf_svc::nvs::EspDefaultNvs,
+) -> anyhow::Result<()> {
     gui.show_status("OTA Mode", "Connecting WiFi...").await.ok();
 
-    let wifi = crate::network::wifi_connect(modem, sysloop, &setting.wifi_list);
-    if let Err(e) = wifi.as_ref() {
+    if let Err(e) = wifi.connect(&setting.wifi_list) {
         log::error!("OTA wifi connect failed: {e:?}");
         gui.show_status("OTA Mode", "Connect WiFi failed\nRestarting...")
             .await
@@ -53,10 +48,9 @@ where
         std::thread::sleep(std::time::Duration::from_secs(3));
         restart();
     }
-    let wifi = wifi.unwrap();
-    crate::network::sync_time_with_ui(gui, touch).await?;
+    crate::network::sync_time_and_timezone_with_ui(gui, touch, nvs).await?;
 
-    let ip = wifi.sta_netif().get_ip_info()?.ip;
+    let ip = wifi.sta_ip()?;
     log::info!("OTA: WiFi connected, IP {}", ip);
 
     let (tx, rx) = std::sync::mpsc::channel::<OtaEvent>();

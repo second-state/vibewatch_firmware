@@ -13,7 +13,7 @@ use embedded_graphics::{
 };
 use embedded_text::TextBox;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicI32, AtomicUsize, Ordering},
     OnceLock,
 };
 use u8g2_fonts::U8g2TextStyle;
@@ -548,12 +548,14 @@ fn list_display_text(text: &str, width: u32) -> String {
 }
 
 pub enum MainMenuSelection {
+    Clock,
     Remote,
     Setting,
 }
 
 pub enum SettingMenuSelection {
     Ota,
+    SyncTime,
     Ble,
     Back,
 }
@@ -573,6 +575,79 @@ pub struct UI {
 
 const DISPLAY_WIDTH: usize = crate::lcd::LCD_WIDTH as usize;
 const DISPLAY_HEIGHT: usize = crate::lcd::LCD_HEIGHT as usize;
+const CLOCK_BACKLIGHT_NORMAL: u8 = 30;
+const CLOCK_IDLE_OFF_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+static CLOCK_UTC_OFFSET_SECS: AtomicI32 = AtomicI32::new(8 * 60 * 60);
+
+pub fn set_clock_utc_offset_secs(offset_secs: i32) {
+    CLOCK_UTC_OFFSET_SECS.store(offset_secs, Ordering::Relaxed);
+}
+
+pub async fn clock_screen(
+    gui: &mut UI,
+    touch: &mut crate::touch::TouchInput,
+    boot_button: &mut crate::boot::BootButton,
+) -> anyhow::Result<()> {
+    set_clock_screen_on(true)?;
+    gui.show_clock().await?;
+    let mut next_tick = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+    let mut idle_off_at = tokio::time::Instant::now() + CLOCK_IDLE_OFF_DELAY;
+    let mut screen_on = true;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(next_tick) => {
+                next_tick += std::time::Duration::from_secs(1);
+                if screen_on {
+                    gui.show_clock().await?;
+                }
+            }
+            _ = tokio::time::sleep_until(idle_off_at), if screen_on => {
+                log::info!("Clock screen idle timeout, turning screen off");
+                set_clock_screen_on(false)?;
+                screen_on = false;
+            }
+            _ = crate::boot::wait_boot_press(boot_button), if screen_on => {
+                log::info!("BOOT button pressed from clock screen, turning screen off");
+                set_clock_screen_on(false)?;
+                screen_on = false;
+            }
+            gesture = touch.next_gesture() => {
+                let Some(gesture) = gesture else {
+                    return Err(anyhow::anyhow!("touch event source closed"));
+                };
+                idle_off_at = tokio::time::Instant::now() + CLOCK_IDLE_OFF_DELAY;
+                if !screen_on {
+                    log::info!("Touch while clock screen is off, restoring clock");
+                    set_clock_screen_on(true)?;
+                    screen_on = true;
+                    touch.cancel_active_gesture();
+                    gui.show_clock().await?;
+                    continue;
+                }
+                if matches!(gesture, crate::touch::TouchGesture::Click { .. }) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+fn set_clock_screen_on(on: bool) -> anyhow::Result<()> {
+    if on {
+        crate::power::hold_light_sleep_lock()?;
+        if let Err(e) = crate::audio::init() {
+            log::warn!("Failed to reopen audio after clock screen on: {e:?}");
+        }
+        crate::lcd::set_backlight(CLOCK_BACKLIGHT_NORMAL)?;
+    } else {
+        crate::lcd::set_backlight(0)?;
+        if let Err(e) = crate::audio::close() {
+            log::warn!("Failed to close audio before clock light sleep: {e:?}");
+        }
+        crate::power::release_light_sleep_lock()?;
+    }
+    Ok(())
+}
 
 pub async fn main_menu(
     gui: &mut UI,
@@ -614,6 +689,15 @@ pub async fn main_menu(
                         press_index,
                         release_index
                     );
+                } else if matches!(
+                    gesture,
+                    crate::touch::TouchGesture::Swipe {
+                        direction: crate::touch::SwipeDirection::Right,
+                        ..
+                    }
+                ) {
+                    log::info!("{title}: right swipe detected, returning to clock");
+                    return Ok(MainMenuSelection::Clock);
                 }
             }
         }
@@ -656,14 +740,16 @@ pub async fn setting_menu(
 ) -> anyhow::Result<SettingMenuSelection> {
     let items = vec![
         ("OTA Update".to_string(), false),
+        ("Sync Time".to_string(), false),
         ("Enable BLE".to_string(), false),
         ("Back".to_string(), false),
     ];
     let index = select_menu_item(gui, touch, "Setting", &items).await?;
     Ok(match index {
         0 => SettingMenuSelection::Ota,
-        1 => SettingMenuSelection::Ble,
-        2 => SettingMenuSelection::Back,
+        1 => SettingMenuSelection::SyncTime,
+        2 => SettingMenuSelection::Ble,
+        3 => SettingMenuSelection::Back,
         _ => unreachable!(),
     })
 }
@@ -791,7 +877,79 @@ fn alpha_mix(source: ColorFormat, target: ColorFormat, alpha: f32) -> ColorForma
     )
 }
 
+fn current_clock_parts() -> (i64, u64, u64, u64, u64) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0) as i64;
+    let offset = CLOCK_UTC_OFFSET_SECS.load(Ordering::Relaxed) as i64;
+    let local_secs = secs + offset;
+    let days = local_secs.div_euclid(24 * 60 * 60);
+    let day_secs = local_secs.rem_euclid(24 * 60 * 60) as u64;
+    let (year, month, day) = civil_from_days(days);
+    (year, month, day, day_secs / 3600, day_secs / 60 % 60)
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u64, u64) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year, month as u64, day as u64)
+}
+
 impl UI {
+    pub async fn show_clock(&mut self) -> anyhow::Result<()> {
+        let (year, month, day, hours, minutes) = current_clock_parts();
+        self.display.clear(ColorFormat::CSS_BLACK)?;
+
+        let time_color = ColorFormat::CSS_DARK_GREEN;
+        let date_style =
+            shifted_text_style(u8g2_fonts::fonts::u8g2_font_logisoso24_tr, time_color, 0);
+        Text::with_alignment(
+            &format!("{year:04}-{month:02}-{day:02}"),
+            Point::new(DISPLAY_WIDTH as i32 / 2, DISPLAY_HEIGHT as i32 / 4),
+            date_style,
+            Alignment::Center,
+        )
+        .draw(self.display.as_mut())?;
+
+        let style = shifted_text_style(u8g2_fonts::fonts::u8g2_font_logisoso78_tn, time_color, 0);
+        let baseline_y = (DISPLAY_HEIGHT as i32 / 2) + 38;
+        Text::with_alignment(
+            &format!("{hours:02}"),
+            Point::new(DISPLAY_WIDTH as i32 / 2 - 72, baseline_y),
+            style.clone(),
+            Alignment::Center,
+        )
+        .draw(self.display.as_mut())?;
+        Text::with_alignment(
+            &format!("{minutes:02}"),
+            Point::new(DISPLAY_WIDTH as i32 / 2 + 72, baseline_y),
+            style,
+            Alignment::Center,
+        )
+        .draw(self.display.as_mut())?;
+
+        let colon_x = DISPLAY_WIDTH as i32 / 2 - 5;
+        for y in [baseline_y - 52, baseline_y - 18] {
+            Rectangle::new(Point::new(colon_x, y), Size::new(10, 10))
+                .into_styled(PrimitiveStyleBuilder::new().fill_color(time_color).build())
+                .draw(self.display.as_mut())?;
+        }
+
+        self.flush_terminal_full().await?;
+        Ok(())
+    }
+
     pub fn set_terminal_theme(&mut self, index: usize) -> &'static str {
         let theme = TerminalTheme::from_index(index);
         TERMINAL_THEME_INDEX.store(index % TerminalTheme::ALL.len(), Ordering::Relaxed);
