@@ -220,7 +220,7 @@ pub async fn run(
                     log::warn!("Ignoring stale screen frame after active session cleared");
                     continue;
                 }
-                let session_sync = if matches!(&ev, MqttEvent::Presence { list_changed: true, .. }) {
+                let session_sync = if matches!(&ev, MqttEvent::Presence { .. }) {
                     Some(sync_sessions_(&mut state, &server))
                 } else {
                     None

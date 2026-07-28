@@ -43,7 +43,7 @@ pub struct SessionListState {
     pub boot_long_press_count: u8,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPickerItem {
     pub prefix: String,
     pub label: String,
@@ -214,8 +214,7 @@ impl AppState {
                         .iter()
                         .any(|item| item.prefix == *prefix && item.working)
             });
-        self.sessions.title = title;
-        self.sessions.items = labels
+        let next_items: Vec<SessionPickerItem> = labels
             .into_iter()
             .map(|(prefix, label, active, working)| SessionPickerItem {
                 prefix,
@@ -224,10 +223,13 @@ impl AppState {
                 working,
             })
             .collect();
+        let changed = self.sessions.title != title || self.sessions.items != next_items;
+        self.sessions.title = title;
+        self.sessions.items = next_items;
         self.sessions.scroll_offset =
             clamp_scroll_offset(self.sessions.scroll_offset, self.sessions.items.len(), 1);
         SessionSyncResult {
-            render: self.route == Route::SessionPicker,
+            render: changed && self.route == Route::SessionPicker,
             play_prompt,
         }
     }
