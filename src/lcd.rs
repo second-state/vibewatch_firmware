@@ -8,6 +8,8 @@ pub const LCD_HEIGHT: u16 = 502;
 pub const LCD_COLOR_BITS: u16 = 16;
 const FLUSH_CHUNK_ROWS: i32 = 64;
 const FLUSH_RETRY_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+const TOUCH_RELEASE_SEND_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+const TOUCH_RELEASE_SEND_RETRIES: usize = 20;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TouchPoint {
@@ -90,7 +92,7 @@ pub fn start_touch_worker(tx: tokio::sync::mpsc::Sender<TouchEvent>) -> anyhow::
                             );
                             logged_press = true;
                         }
-                        if tx.try_send(TouchEvent::Press(touch)).is_err() {
+                        if !send_touch_press(&tx, touch) {
                             return;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -105,7 +107,7 @@ pub fn start_touch_worker(tx: tokio::sync::mpsc::Sender<TouchEvent>) -> anyhow::
                                     touch.strength
                                 );
                             }
-                            if tx.try_send(TouchEvent::Release(touch)).is_err() {
+                            if !send_touch_release(&tx, touch) {
                                 return;
                             }
                         } else if logged_press {
@@ -118,6 +120,36 @@ pub fn start_touch_worker(tx: tokio::sync::mpsc::Sender<TouchEvent>) -> anyhow::
         })?;
 
     Ok(())
+}
+
+fn send_touch_press(tx: &tokio::sync::mpsc::Sender<TouchEvent>, touch: TouchPoint) -> bool {
+    match tx.try_send(TouchEvent::Press(touch)) {
+        Ok(()) => true,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            log::debug!("Touch press dropped because channel is full");
+            true
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
+
+fn send_touch_release(tx: &tokio::sync::mpsc::Sender<TouchEvent>, touch: TouchPoint) -> bool {
+    let mut event = TouchEvent::Release(touch);
+    for attempt in 0..=TOUCH_RELEASE_SEND_RETRIES {
+        match tx.try_send(event) {
+            Ok(()) => return true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
+                event = returned;
+                if attempt == TOUCH_RELEASE_SEND_RETRIES {
+                    log::warn!("Touch release dropped because channel stayed full");
+                    return true;
+                }
+                std::thread::sleep(TOUCH_RELEASE_SEND_RETRY_DELAY);
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return false,
+        }
+    }
+    true
 }
 
 unsafe extern "C" fn touch_interrupt_callback(
