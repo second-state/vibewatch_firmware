@@ -463,14 +463,14 @@ fn days_from_civil(mut year: i64, month: u32, day: u32) -> i64 {
 
 fn enable_wifi_power_save() -> anyhow::Result<()> {
     let code = unsafe {
-        esp_idf_svc::sys::esp_wifi_set_ps(esp_idf_svc::sys::wifi_ps_type_t_WIFI_PS_MAX_MODEM)
+        esp_idf_svc::sys::esp_wifi_set_ps(esp_idf_svc::sys::wifi_ps_type_t_WIFI_PS_MIN_MODEM)
     };
     if code == esp_idf_svc::sys::ESP_OK as i32 {
-        info!("WiFi power save enabled: WIFI_PS_MAX_MODEM");
+        info!("WiFi power save enabled: WIFI_PS_MIN_MODEM");
         Ok(())
     } else {
         Err(anyhow::anyhow!(
-            "esp_wifi_set_ps(WIFI_PS_MAX_MODEM) failed: esp_err_t={code}"
+            "esp_wifi_set_ps(WIFI_PS_MIN_MODEM) failed: esp_err_t={code}"
         ))
     }
 }
