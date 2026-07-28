@@ -44,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     lcd::start_touch_worker(touch_tx)?;
     let mut touch = touch::TouchInput::new(touch_rx);
     let mut boot_button = boot::new_boot_button(peripherals.pins.gpio0.into())?;
-    lcd::set_backlight(30)?;
+    lcd::set_backlight(50)?;
     power::init()?;
     power::start_power_key_worker();
     // ===

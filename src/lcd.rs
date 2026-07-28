@@ -43,6 +43,16 @@ pub fn set_backlight(light: u8) -> anyhow::Result<()> {
     })
 }
 
+pub fn set_display_on(on: bool) -> anyhow::Result<()> {
+    let panel = unsafe { esp_idf_svc::sys::board::get_panel_handle() };
+    if panel.is_null() {
+        return Err(anyhow::anyhow!("get_panel_handle returned null"));
+    }
+    esp_err("esp_lcd_panel_disp_on_off", unsafe {
+        esp_idf_svc::sys::esp_lcd_panel_disp_on_off(panel as _, on)
+    })
+}
+
 pub fn read_touch() -> Option<TouchPoint> {
     let mut x = 0;
     let mut y = 0;

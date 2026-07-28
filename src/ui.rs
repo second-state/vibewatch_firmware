@@ -575,7 +575,7 @@ pub struct UI {
 
 const DISPLAY_WIDTH: usize = crate::lcd::LCD_WIDTH as usize;
 const DISPLAY_HEIGHT: usize = crate::lcd::LCD_HEIGHT as usize;
-const CLOCK_BACKLIGHT_NORMAL: u8 = 30;
+const CLOCK_BACKLIGHT_NORMAL: u8 = 50;
 const CLOCK_IDLE_OFF_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 static CLOCK_UTC_OFFSET_SECS: AtomicI32 = AtomicI32::new(8 * 60 * 60);
 
@@ -638,9 +638,10 @@ fn set_clock_screen_on(on: bool) -> anyhow::Result<()> {
         if let Err(e) = crate::audio::init() {
             log::warn!("Failed to reopen audio after clock screen on: {e:?}");
         }
+        crate::lcd::set_display_on(true)?;
         crate::lcd::set_backlight(CLOCK_BACKLIGHT_NORMAL)?;
     } else {
-        crate::lcd::set_backlight(0)?;
+        crate::lcd::set_display_on(false)?;
         if let Err(e) = crate::audio::close() {
             log::warn!("Failed to close audio before clock light sleep: {e:?}");
         }

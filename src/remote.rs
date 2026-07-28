@@ -38,11 +38,10 @@ impl BacklightMode {
                 log::warn!("Failed to reopen audio after screen on: {e:?}");
             }
         }
-        let level = match mode {
-            Self::Normal => BACKLIGHT_NORMAL,
-            Self::Off => 0,
-        };
-        crate::lcd::set_backlight(level)?;
+        crate::lcd::set_display_on(mode == Self::Normal)?;
+        if mode == Self::Normal {
+            crate::lcd::set_backlight(BACKLIGHT_NORMAL)?;
+        }
         if mode == Self::Off {
             if let Err(e) = crate::audio::close() {
                 log::warn!("Failed to close audio before light sleep: {e:?}");
@@ -116,6 +115,8 @@ pub async fn run(
             }
             // 定时刷新 session list 标题里的电量。
             _ = tokio::time::sleep_until(render_state.next_title_refresh), if state.route == app::Route::SessionPicker && backlight != BacklightMode::Off => {
+                render_state.next_title_refresh =
+                    tokio::time::Instant::now() + crate::ui::MENU_TITLE_REFRESH_DELAY;
                 render_requested = state.set_session_title(session_picker_title());
             }
             // session list 长时间无变化时自动熄屏。
