@@ -254,8 +254,10 @@ pub async fn run(
                     render_requested = true;
                 }
                 if let Some(sync) = session_sync {
-                    last_session_list_change = tokio::time::Instant::now();
-                    session_list_off_since = None;
+                    if sync.session_activity {
+                        last_session_list_change = tokio::time::Instant::now();
+                        session_list_off_since = None;
+                    }
                     if sync.play_prompt && audio_prompt_enabled {
                         if let Some(prompt) = audio_prompt {
                             prompt.play_async();

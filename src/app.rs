@@ -181,6 +181,7 @@ pub struct AppRenderState {
 pub struct SessionSyncResult {
     pub render: bool,
     pub play_prompt: bool,
+    pub session_activity: bool,
 }
 
 impl AppRenderState {
@@ -223,14 +224,27 @@ impl AppState {
                 working,
             })
             .collect();
-        let changed = self.sessions.title != title || self.sessions.items != next_items;
+        let structure_changed = self.sessions.items.len() != next_items.len()
+            || self
+                .sessions
+                .items
+                .iter()
+                .zip(next_items.iter())
+                .any(|(old, new)| old.prefix != new.prefix);
+        let working_changed = self
+            .sessions
+            .items
+            .iter()
+            .zip(next_items.iter())
+            .any(|(old, new)| old.prefix == new.prefix && old.working != new.working);
         self.sessions.title = title;
         self.sessions.items = next_items;
         self.sessions.scroll_offset =
             clamp_scroll_offset(self.sessions.scroll_offset, self.sessions.items.len(), 1);
         SessionSyncResult {
-            render: changed && self.route == Route::SessionPicker,
+            render: (structure_changed || working_changed) && self.route == Route::SessionPicker,
             play_prompt,
+            session_activity: working_changed,
         }
     }
 
