@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// NVS key:整份 wifi_list 作为一个 JSON 字符串存。
 pub const WIFI_LIST_KEY: &str = "wifi_list";
+pub const TIMEZONE_OFFSET_SECS_KEY: &str = "tz_offset";
 /// NVS 单值 ~4KB 限额内最多保存的 WiFi 数。
 pub const MAX_WIFI_CREDS: usize = 8;
 
@@ -24,6 +25,8 @@ pub struct Setting {
     pub wifi_list: Vec<WifiCred>,
     /// MQTT broker URI(mqtt:// 或 mqtts://),主固件连 vibetty 用;救援固件不读。
     pub server_url: String,
+    /// 时钟显示使用的 UTC 偏移秒数。SNTP 只同步 epoch,时区需要单独维护。
+    pub timezone_offset_secs: i32,
 }
 
 impl Setting {
@@ -33,12 +36,21 @@ impl Setting {
         Ok(())
     }
 
+    pub fn save_timezone_offset_secs(
+        nvs: &mut EspDefaultNvs,
+        offset_secs: i32,
+    ) -> anyhow::Result<()> {
+        nvs.set_i32(TIMEZONE_OFFSET_SECS_KEY, offset_secs)?;
+        Ok(())
+    }
+
     /// 清空全部配置(将来的「恢复出厂」设置项用;触屏设置页接入后调用)。
     #[allow(dead_code)]
     pub fn clear_nvs(nvs: &mut EspDefaultNvs) -> anyhow::Result<()> {
         nvs.remove(WIFI_LIST_KEY)?;
         nvs.remove("server_url")?;
         nvs.remove("asr_config")?;
+        nvs.remove(TIMEZONE_OFFSET_SECS_KEY)?;
         Ok(())
     }
 
@@ -66,9 +78,17 @@ impl Setting {
             .unwrap_or("")
             .to_string();
 
+        let timezone_offset_secs = nvs
+            .get_i32(TIMEZONE_OFFSET_SECS_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or(8 * 60 * 60);
+        log::info!("Loaded timezone offset from NVS: {timezone_offset_secs}s");
+
         Ok(Setting {
             wifi_list,
             server_url,
+            timezone_offset_secs,
         })
     }
 

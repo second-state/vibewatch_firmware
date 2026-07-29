@@ -12,13 +12,17 @@ use embedded_graphics::{
     text::{Alignment, Text},
 };
 use embedded_text::TextBox;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+    atomic::{AtomicI32, AtomicUsize, Ordering},
+    OnceLock,
+};
 use u8g2_fonts::U8g2TextStyle;
 
 const GIF_IMG: &[u8] = include_bytes!("../assets/ht.gif");
 
 pub type UiColor = Rgb565;
 type ColorFormat = UiColor;
+type TerminalRenderer = embedded_graphics_terminal::TerminalRenderer;
 pub const TEXT_LIGHT: UiColor = UiColor::CSS_LIGHT_GRAY;
 
 #[derive(Debug, Clone)]
@@ -293,7 +297,7 @@ pub async fn ui_background() -> Result<(), std::convert::Infallible> {
     Ok(())
 }
 
-fn new_terminal_renderer() -> embedded_graphics_terminal::TerminalRenderer {
+fn new_terminal_renderer() -> TerminalRenderer {
     use embedded_graphics_terminal::TerminalRenderer;
     use u8g2_fonts::fonts::{
         u8g2_font_unifont_t_78_79, u8g2_font_unifont_t_gb2312, u8g2_font_unifont_t_symbols,
@@ -315,8 +319,10 @@ fn new_terminal_renderer() -> embedded_graphics_terminal::TerminalRenderer {
 }
 
 pub fn terminal_text_cells() -> (u16, u16) {
-    let renderer = new_terminal_renderer();
-    (renderer.cols() as u16, renderer.rows() as u16)
+    *TERMINAL_TEXT_CELLS.get_or_init(|| {
+        let renderer = new_terminal_renderer();
+        (renderer.cols() as u16, renderer.rows() as u16)
+    })
 }
 
 pub fn terminal_theme_label() -> &'static str {
@@ -349,9 +355,59 @@ const TERMINAL_APPEND_RENDER_TIMEOUT: std::time::Duration = std::time::Duration:
 fn build_version_label() -> &'static str {
     option_env!("VIBEKEYS_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
-const TERMINAL_SCROLL_ROWS: usize = 10;
-const TERMINAL_SCROLLBACK_ROWS: usize = 64;
+const TERMINAL_SCROLLBACK_ROWS: usize = 16;
 static TERMINAL_THEME_INDEX: AtomicUsize = AtomicUsize::new(0);
+static TERMINAL_TEXT_CELLS: OnceLock<(u16, u16)> = OnceLock::new();
+
+struct TerminalSession {
+    parser: vt100::Parser,
+    renderer: TerminalRenderer,
+}
+
+struct TerminalState {
+    cols: u16,
+    rows: u16,
+    session: Option<TerminalSession>,
+    last_render_us: i64,
+    append_render_deadline: Option<tokio::time::Instant>,
+}
+
+impl TerminalState {
+    fn new() -> Self {
+        let (cols, rows) = terminal_text_cells();
+        Self {
+            cols,
+            rows,
+            session: None,
+            last_render_us: 0,
+            append_render_deadline: None,
+        }
+    }
+
+    fn reset_session(&mut self) {
+        let renderer = new_terminal_renderer();
+        self.cols = renderer.cols() as u16;
+        self.rows = renderer.rows() as u16;
+        self.session = Some(TerminalSession {
+            parser: vt100::Parser::new(self.rows, self.cols, TERMINAL_SCROLLBACK_ROWS),
+            renderer,
+        });
+    }
+
+    fn ensure_session(&mut self) -> &mut TerminalSession {
+        if self.session.is_none() {
+            self.reset_session();
+        }
+        self.session.as_mut().expect("terminal session initialized")
+    }
+
+    fn set_theme(&mut self) {
+        if let Some(session) = self.session.as_mut() {
+            session.renderer = new_terminal_renderer();
+            session.renderer.invalidate();
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TerminalTheme {
@@ -492,19 +548,16 @@ fn list_display_text(text: &str, width: u32) -> String {
 }
 
 pub enum MainMenuSelection {
+    Clock,
     Remote,
     Setting,
 }
 
 pub enum SettingMenuSelection {
     Ota,
+    SyncTime,
     Ble,
     Back,
-}
-
-pub enum TerminalScroll {
-    Up,
-    Down,
 }
 
 pub struct UI {
@@ -516,18 +569,90 @@ pub struct UI {
     text_background: Vec<Pixel<ColorFormat>>,
 
     display: Box<FastFramebuffer>,
-    terminal_parser: Option<vt100::Parser>,
-    terminal_renderer: Option<embedded_graphics_terminal::TerminalRenderer>,
-    terminal_last_render_us: i64,
+    terminal: TerminalState,
     jpeg_screen: Option<crate::new_jpg::JpegBufferu16>,
 }
 
 const DISPLAY_WIDTH: usize = crate::lcd::LCD_WIDTH as usize;
 const DISPLAY_HEIGHT: usize = crate::lcd::LCD_HEIGHT as usize;
+const CLOCK_BACKLIGHT_NORMAL: u8 = 50;
+const CLOCK_IDLE_OFF_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+static CLOCK_UTC_OFFSET_SECS: AtomicI32 = AtomicI32::new(8 * 60 * 60);
+
+pub fn set_clock_utc_offset_secs(offset_secs: i32) {
+    CLOCK_UTC_OFFSET_SECS.store(offset_secs, Ordering::Relaxed);
+}
+
+pub async fn clock_screen(
+    gui: &mut UI,
+    touch: &mut crate::touch::TouchInput,
+    boot_button: &mut crate::boot::BootButton,
+) -> anyhow::Result<()> {
+    set_clock_screen_on(true)?;
+    gui.show_clock().await?;
+    let mut next_tick = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+    let mut idle_off_at = tokio::time::Instant::now() + CLOCK_IDLE_OFF_DELAY;
+    let mut screen_on = true;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(next_tick) => {
+                next_tick += std::time::Duration::from_secs(1);
+                if screen_on {
+                    gui.show_clock().await?;
+                }
+            }
+            _ = tokio::time::sleep_until(idle_off_at), if screen_on => {
+                log::info!("Clock screen idle timeout, turning screen off");
+                set_clock_screen_on(false)?;
+                screen_on = false;
+            }
+            _ = crate::boot::wait_boot_press(boot_button), if screen_on => {
+                log::info!("BOOT button pressed from clock screen, turning screen off");
+                set_clock_screen_on(false)?;
+                screen_on = false;
+            }
+            gesture = touch.next_gesture() => {
+                let Some(gesture) = gesture else {
+                    return Err(anyhow::anyhow!("touch event source closed"));
+                };
+                idle_off_at = tokio::time::Instant::now() + CLOCK_IDLE_OFF_DELAY;
+                if !screen_on {
+                    log::info!("Touch while clock screen is off, restoring clock");
+                    set_clock_screen_on(true)?;
+                    screen_on = true;
+                    touch.cancel_active_gesture();
+                    gui.show_clock().await?;
+                    continue;
+                }
+                if matches!(gesture, crate::touch::TouchGesture::Click { .. }) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+fn set_clock_screen_on(on: bool) -> anyhow::Result<()> {
+    if on {
+        crate::power::hold_light_sleep_lock()?;
+        if let Err(e) = crate::audio::init() {
+            log::warn!("Failed to reopen audio after clock screen on: {e:?}");
+        }
+        crate::lcd::set_display_on(true)?;
+        crate::lcd::set_backlight(CLOCK_BACKLIGHT_NORMAL)?;
+    } else {
+        crate::lcd::set_display_on(false)?;
+        if let Err(e) = crate::audio::close() {
+            log::warn!("Failed to close audio before clock light sleep: {e:?}");
+        }
+        crate::power::release_light_sleep_lock()?;
+    }
+    Ok(())
+}
 
 pub async fn main_menu(
     gui: &mut UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<crate::lcd::TouchEvent>,
+    touch: &mut crate::touch::TouchInput,
 ) -> anyhow::Result<MainMenuSelection> {
     let items = vec![
         ("Remote".to_string(), false),
@@ -537,7 +662,6 @@ pub async fn main_menu(
     let item_rects = gui.display_menu_list(&title, &items).await?;
     log::info!("{title}: waiting for touch selection");
 
-    let mut press_index = None;
     let mut next_title_refresh = tokio::time::Instant::now() + MENU_TITLE_REFRESH_DELAY;
     let index = loop {
         tokio::select! {
@@ -549,28 +673,32 @@ pub async fn main_menu(
                     title = next_title;
                 }
             }
-            event = touch_rx.recv() => {
-                match event {
-                    Some(crate::lcd::TouchEvent::Press(touch)) => {
-                        if press_index.is_none() {
-                            press_index = list_touch_index(touch, &item_rects);
-                        }
+            gesture = touch.next_gesture() => {
+                let Some(gesture) = gesture else {
+                    return Err(anyhow::anyhow!("touch event source closed"));
+                };
+                if let crate::touch::TouchGesture::Click { start, end } = gesture {
+                    let press_index = list_touch_index(start, &item_rects);
+                    let release_index = list_touch_index(end, &item_rects);
+                    if press_index.is_some() && press_index == release_index {
+                        let index = press_index.unwrap();
+                        log::info!("{title}: selected item {index}");
+                        break index;
                     }
-                    Some(crate::lcd::TouchEvent::Release(touch)) => {
-                        let release_index = list_touch_index(touch, &item_rects);
-                        if press_index.is_some() && press_index == release_index {
-                            let index = press_index.unwrap();
-                            log::info!("{title}: selected item {index}");
-                            break index;
-                        }
-                        log::info!(
-                            "{title}: ignored touch, press={:?} release={:?}",
-                            press_index,
-                            release_index
-                        );
-                        press_index = None;
+                    log::info!(
+                        "{title}: ignored touch, press={:?} release={:?}",
+                        press_index,
+                        release_index
+                    );
+                } else if matches!(
+                    gesture,
+                    crate::touch::TouchGesture::Swipe {
+                        direction: crate::touch::SwipeDirection::Right,
+                        ..
                     }
-                    None => return Err(anyhow::anyhow!("touch event source closed")),
+                ) {
+                    log::info!("{title}: right swipe detected, returning to clock");
+                    return Ok(MainMenuSelection::Clock);
                 }
             }
         }
@@ -609,41 +737,38 @@ fn list_title_color(title: &str) -> ColorFormat {
 
 pub async fn setting_menu(
     gui: &mut UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<crate::lcd::TouchEvent>,
+    touch: &mut crate::touch::TouchInput,
 ) -> anyhow::Result<SettingMenuSelection> {
     let items = vec![
         ("OTA Update".to_string(), false),
+        ("Sync Time".to_string(), false),
         ("Enable BLE".to_string(), false),
         ("Back".to_string(), false),
     ];
-    let index = select_menu_item(gui, touch_rx, "Setting", &items).await?;
+    let index = select_menu_item(gui, touch, "Setting", &items).await?;
     Ok(match index {
         0 => SettingMenuSelection::Ota,
-        1 => SettingMenuSelection::Ble,
-        2 => SettingMenuSelection::Back,
+        1 => SettingMenuSelection::SyncTime,
+        2 => SettingMenuSelection::Ble,
+        3 => SettingMenuSelection::Back,
         _ => unreachable!(),
     })
 }
 
 pub async fn select_menu_item(
     gui: &mut UI,
-    touch_rx: &mut tokio::sync::mpsc::Receiver<crate::lcd::TouchEvent>,
+    touch: &mut crate::touch::TouchInput,
     title: &str,
     items: &[(String, bool)],
 ) -> anyhow::Result<usize> {
     let item_rects = gui.display_menu_list(title, items).await?;
     log::info!("{title}: waiting for touch selection");
 
-    let mut press_index = None;
     loop {
-        match touch_rx.recv().await {
-            Some(crate::lcd::TouchEvent::Press(touch)) => {
-                if press_index.is_none() {
-                    press_index = list_touch_index(touch, &item_rects);
-                }
-            }
-            Some(crate::lcd::TouchEvent::Release(touch)) => {
-                let release_index = list_touch_index(touch, &item_rects);
+        match touch.next_gesture().await {
+            Some(crate::touch::TouchGesture::Click { start, end }) => {
+                let press_index = list_touch_index(start, &item_rects);
+                let release_index = list_touch_index(end, &item_rects);
                 if press_index.is_some() && press_index == release_index {
                     let index = press_index.unwrap();
                     log::info!("{title}: selected item {index}");
@@ -654,8 +779,8 @@ pub async fn select_menu_item(
                     press_index,
                     release_index
                 );
-                press_index = None;
             }
+            Some(_) => {}
             None => return Err(anyhow::anyhow!("touch event source closed")),
         }
     }
@@ -737,9 +862,7 @@ impl Default for UI {
             text: String::new(),
             text_background: box_pixels,
             display,
-            terminal_parser: None,
-            terminal_renderer: None,
-            terminal_last_render_us: 0,
+            terminal: TerminalState::new(),
             jpeg_screen: None,
             state_area,
             text_area,
@@ -755,11 +878,83 @@ fn alpha_mix(source: ColorFormat, target: ColorFormat, alpha: f32) -> ColorForma
     )
 }
 
+fn current_clock_parts() -> (i64, u64, u64, u64, u64) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0) as i64;
+    let offset = CLOCK_UTC_OFFSET_SECS.load(Ordering::Relaxed) as i64;
+    let local_secs = secs + offset;
+    let days = local_secs.div_euclid(24 * 60 * 60);
+    let day_secs = local_secs.rem_euclid(24 * 60 * 60) as u64;
+    let (year, month, day) = civil_from_days(days);
+    (year, month, day, day_secs / 3600, day_secs / 60 % 60)
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u64, u64) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+    (year, month as u64, day as u64)
+}
+
 impl UI {
+    pub async fn show_clock(&mut self) -> anyhow::Result<()> {
+        let (year, month, day, hours, minutes) = current_clock_parts();
+        self.display.clear(ColorFormat::CSS_BLACK)?;
+
+        let time_color = ColorFormat::CSS_DARK_GREEN;
+        let date_style =
+            shifted_text_style(u8g2_fonts::fonts::u8g2_font_logisoso24_tr, time_color, 0);
+        Text::with_alignment(
+            &format!("{year:04}-{month:02}-{day:02}"),
+            Point::new(DISPLAY_WIDTH as i32 / 2, DISPLAY_HEIGHT as i32 / 4),
+            date_style,
+            Alignment::Center,
+        )
+        .draw(self.display.as_mut())?;
+
+        let style = shifted_text_style(u8g2_fonts::fonts::u8g2_font_logisoso78_tn, time_color, 0);
+        let baseline_y = (DISPLAY_HEIGHT as i32 / 2) + 38;
+        Text::with_alignment(
+            &format!("{hours:02}"),
+            Point::new(DISPLAY_WIDTH as i32 / 2 - 72, baseline_y),
+            style.clone(),
+            Alignment::Center,
+        )
+        .draw(self.display.as_mut())?;
+        Text::with_alignment(
+            &format!("{minutes:02}"),
+            Point::new(DISPLAY_WIDTH as i32 / 2 + 72, baseline_y),
+            style,
+            Alignment::Center,
+        )
+        .draw(self.display.as_mut())?;
+
+        let colon_x = DISPLAY_WIDTH as i32 / 2 - 5;
+        for y in [baseline_y - 52, baseline_y - 18] {
+            Rectangle::new(Point::new(colon_x, y), Size::new(10, 10))
+                .into_styled(PrimitiveStyleBuilder::new().fill_color(time_color).build())
+                .draw(self.display.as_mut())?;
+        }
+
+        self.flush_terminal_full().await?;
+        Ok(())
+    }
+
     pub fn set_terminal_theme(&mut self, index: usize) -> &'static str {
         let theme = TerminalTheme::from_index(index);
         TERMINAL_THEME_INDEX.store(index % TerminalTheme::ALL.len(), Ordering::Relaxed);
-        self.terminal_renderer = None;
+        self.terminal.set_theme();
         theme.label()
     }
 
@@ -945,23 +1140,19 @@ impl UI {
             log::warn!("empty screen_text frame");
             return Ok(());
         };
-        let (cols, rows) = terminal_text_cells();
         let full_frame = tag == 0x00;
         match tag {
             0x00 => {
                 log::info!("screen_text full frame: {}B", bytes.len());
-                self.terminal_parser =
-                    Some(vt100::Parser::new(rows, cols, TERMINAL_SCROLLBACK_ROWS));
+                self.terminal.reset_session();
+                self.terminal.append_render_deadline = None;
             }
             0x01 => {
                 log::debug!("screen_text delta frame: {}B", bytes.len());
-                if self.terminal_parser.is_none() {
+                if self.terminal.session.is_none() {
                     log::warn!("screen_text delta before full frame; creating blank terminal");
-                    self.terminal_parser =
-                        Some(vt100::Parser::new(rows, cols, TERMINAL_SCROLLBACK_ROWS));
-                    if let Some(renderer) = self.terminal_renderer.as_mut() {
-                        renderer.invalidate();
-                    }
+                    self.terminal.reset_session();
+                    self.terminal.ensure_session().renderer.invalidate();
                 }
             }
             other => {
@@ -971,15 +1162,13 @@ impl UI {
         }
 
         let parse_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
-        if let Some(parser) = self.terminal_parser.as_mut() {
-            parser.process(bytes);
-        }
+        self.terminal.ensure_session().parser.process(bytes);
         let parse_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - parse_start_us;
         let now_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
 
-        let since_last_render = if self.terminal_last_render_us > 0 {
+        let since_last_render = if self.terminal.last_render_us > 0 {
             Some(std::time::Duration::from_micros(
-                (now_us - self.terminal_last_render_us) as u64,
+                (now_us - self.terminal.last_render_us) as u64,
             ))
         } else {
             None
@@ -997,37 +1186,78 @@ impl UI {
             tokio::time::sleep(TERMINAL_APPEND_RENDER_TIMEOUT - elapsed).await;
         }
 
-        let mut renderer = self
-            .terminal_renderer
-            .take()
-            .unwrap_or_else(new_terminal_renderer);
+        self.render_terminal_frame(tag, bytes.len(), parse_elapsed_us, full_frame)
+            .await
+    }
+
+    pub async fn buffer_terminal_text_frame(&mut self, payload: &[u8]) -> anyhow::Result<()> {
+        let Some((&tag, bytes)) = payload.split_first() else {
+            log::warn!("empty screen_text frame");
+            return Ok(());
+        };
+        if tag != 0x01 {
+            return self.show_terminal_text_frame(payload).await;
+        }
+
+        log::debug!("screen_text delta frame: {}B", bytes.len());
+        if self.terminal.session.is_none() {
+            log::warn!("screen_text delta before full frame; creating blank terminal");
+            self.terminal.reset_session();
+            self.terminal.ensure_session().renderer.invalidate();
+        }
+
+        let parse_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+        self.terminal.ensure_session().parser.process(bytes);
+        let parse_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - parse_start_us;
+
+        if self.terminal.append_render_deadline.is_none() {
+            self.terminal.append_render_deadline =
+                Some(tokio::time::Instant::now() + TERMINAL_APPEND_RENDER_TIMEOUT);
+        }
+        log::debug!(
+            "screen_text append buffered: bytes={} parse={:.2}ms deadline_set={}",
+            bytes.len(),
+            parse_elapsed_us as f32 / 1000.0,
+            self.terminal.append_render_deadline.is_some()
+        );
+        Ok(())
+    }
+
+    async fn render_terminal_frame(
+        &mut self,
+        tag: u8,
+        byte_len: usize,
+        parse_elapsed_us: i64,
+        full_frame: bool,
+    ) -> anyhow::Result<()> {
         let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
-        let dirty = if full_frame {
-            self.display.clear(ColorFormat::CSS_BLACK)?;
-            if let Some(parser) = self.terminal_parser.as_ref() {
-                renderer.render(parser.screen(), self.display.as_mut())?;
-            }
-            renderer.invalidate();
-            Some(self.display.bounding_box())
-        } else {
-            match self.terminal_parser.as_ref() {
-                Some(parser) => renderer.render_diff(parser.screen(), self.display.as_mut())?,
-                None => None,
+        let dirty = {
+            let session = self.terminal.ensure_session();
+            if full_frame {
+                self.display.clear(ColorFormat::CSS_BLACK)?;
+                session
+                    .renderer
+                    .render(session.parser.screen(), self.display.as_mut())?;
+                session.renderer.invalidate();
+                Some(self.display.bounding_box())
+            } else {
+                session
+                    .renderer
+                    .render_diff(session.parser.screen(), self.display.as_mut())?
             }
         };
         let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
-        let cache_len = renderer.cache_len();
-        self.terminal_renderer = Some(renderer);
+        let cache_len = self.terminal.ensure_session().renderer.cache_len();
 
         let flush_elapsed_us = match (full_frame, dirty) {
             (true, Some(_)) => self.flush_terminal_full().await?,
             (false, Some(rect)) => self.flush_terminal_dirty(rect).await?.unwrap_or(0),
             (_, None) => 0,
         };
-        self.terminal_last_render_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+        self.terminal.last_render_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
         log::info!(
             "screen_text frame tag=0x{tag:02x} bytes={} parse={:.2}ms render={:.2}ms flush={:.2}ms cache_len={} dirty={:?}",
-            bytes.len(),
+            byte_len,
             parse_elapsed_us as f32 / 1000.0,
             render_elapsed_us as f32 / 1000.0,
             flush_elapsed_us as f32 / 1000.0,
@@ -1037,54 +1267,59 @@ impl UI {
         Ok(())
     }
 
-    pub async fn scroll_terminal_text(
-        &mut self,
-        direction: TerminalScroll,
-    ) -> anyhow::Result<bool> {
-        let Some(parser) = self.terminal_parser.as_mut() else {
-            return Ok(false);
-        };
-        let before = parser.screen().scrollback();
-        let next = match direction {
-            TerminalScroll::Up => before.saturating_add(TERMINAL_SCROLL_ROWS),
-            TerminalScroll::Down => before.saturating_sub(TERMINAL_SCROLL_ROWS),
-        };
-        parser.screen_mut().set_scrollback(next);
-        let after = parser.screen().scrollback();
-        if after == before {
-            return Ok(false);
-        }
+    pub fn terminal_append_render_deadline(&self) -> Option<tokio::time::Instant> {
+        self.terminal.append_render_deadline
+    }
 
-        log::info!("local text scroll: {before} -> {after}");
-        let mut renderer = self
-            .terminal_renderer
-            .take()
-            .unwrap_or_else(new_terminal_renderer);
-        let dirty = renderer.render_diff(parser.screen(), self.display.as_mut())?;
-        log::info!("local text scroll cache_len={}", renderer.cache_len());
-        self.terminal_renderer = Some(renderer);
-        if let Some(rect) = dirty {
-            let _ = self.flush_terminal_dirty(rect).await?;
+    pub fn cancel_pending_terminal_append(&mut self) {
+        self.terminal.append_render_deadline = None;
+    }
+
+    pub async fn render_pending_terminal_append(&mut self) -> anyhow::Result<bool> {
+        if self.terminal.append_render_deadline.is_none() {
+            return Ok(false);
         }
-        Ok(true)
+        self.terminal.append_render_deadline = None;
+
+        let Some(session) = self.terminal.session.as_mut() else {
+            return Ok(false);
+        };
+        let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+        let dirty = session
+            .renderer
+            .render_diff(session.parser.screen(), self.display.as_mut())?;
+        let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
+        let cache_len = session.renderer.cache_len();
+
+        let flush_elapsed_us = match dirty {
+            Some(rect) => self.flush_terminal_dirty(rect).await?.unwrap_or(0),
+            None => 0,
+        };
+        self.terminal.last_render_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
+        log::info!(
+            "screen_text append render: render={:.2}ms flush={:.2}ms cache_len={} dirty={:?}",
+            render_elapsed_us as f32 / 1000.0,
+            flush_elapsed_us as f32 / 1000.0,
+            cache_len,
+            dirty
+        );
+        Ok(dirty.is_some())
     }
 
     pub async fn redraw_cached_terminal_text(&mut self) -> anyhow::Result<bool> {
-        let Some(parser) = self.terminal_parser.as_ref() else {
+        let Some(session) = self.terminal.session.as_mut() else {
             return Ok(false);
         };
+        self.terminal.append_render_deadline = None;
 
         let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
-        let mut renderer = self
-            .terminal_renderer
-            .take()
-            .unwrap_or_else(new_terminal_renderer);
         self.display.clear(ColorFormat::CSS_BLACK)?;
-        renderer.render(parser.screen(), self.display.as_mut())?;
-        renderer.invalidate();
+        session
+            .renderer
+            .render(session.parser.screen(), self.display.as_mut())?;
+        session.renderer.invalidate();
         let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
-        let cache_len = renderer.cache_len();
-        self.terminal_renderer = Some(renderer);
+        let cache_len = session.renderer.cache_len();
 
         let flush_elapsed_us = self.flush_terminal_full().await?;
         log::info!(
