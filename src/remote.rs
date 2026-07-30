@@ -222,7 +222,6 @@ pub async fn run(
                         session_item_rects: &render_state.session_item_rects,
                     },
                 );
-                let should_render = result.render;
                 let render_after_effect = handle_app_event_result_(
                     result,
                     &mut state,
@@ -241,8 +240,9 @@ pub async fn run(
                 if render_after_effect {
                     render_requested = true;
                 }
-                if should_render {
+                if state.route == app::Route::SessionPicker {
                     last_session_list_change = tokio::time::Instant::now();
+                    session_list_off_since = None;
                 }
             }
             // MQTT 事件更新 AppState，screen frame 也从这里进入渲染。
@@ -265,6 +265,8 @@ pub async fn run(
                 if let Some(sync) = session_sync.as_ref() {
                     render_requested |= sync.render;
                 }
+                let was_session_picker = state.route == app::Route::SessionPicker;
+                let was_backlight_off = backlight == BacklightMode::Off;
                 let result = state.handle_event(
                     app::AppEvent::Mqtt(ev),
                     &app::AppEventContext {
@@ -303,6 +305,13 @@ pub async fn run(
                 }
                 if should_render {
                     render_requested = true;
+                }
+                if state.route == app::Route::SessionPicker
+                    && (!was_session_picker
+                        || (was_backlight_off && backlight != BacklightMode::Off))
+                {
+                    last_session_list_change = tokio::time::Instant::now();
+                    session_list_off_since = None;
                 }
             }
         }
