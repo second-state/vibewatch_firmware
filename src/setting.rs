@@ -51,6 +51,7 @@ impl Setting {
         nvs.remove("server_url")?;
         nvs.remove("asr_config")?;
         nvs.remove(TIMEZONE_OFFSET_SECS_KEY)?;
+        nvs.remove(crate::background::BACKGROUND_GIF_KEY)?;
         Ok(())
     }
 

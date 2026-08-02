@@ -18,8 +18,6 @@ use std::sync::{
 };
 use u8g2_fonts::U8g2TextStyle;
 
-const GIF_IMG: &[u8] = include_bytes!("../assets/ht.gif");
-
 pub type UiColor = Rgb565;
 type ColorFormat = UiColor;
 type TerminalRenderer = embedded_graphics_terminal::TerminalRenderer;
@@ -295,7 +293,6 @@ impl DrawTarget for OffsetDrawTarget<'_> {
         }
         Ok(())
     }
-
 }
 
 fn fill_rgb565_be_row(row: &mut [u8], raw: u16) {
@@ -329,8 +326,9 @@ fn rgb565_be(color: ColorFormat) -> [u8; 2] {
     RawU16::from(color).into_inner().to_be_bytes()
 }
 
-pub async fn ui_background() -> Result<(), std::convert::Infallible> {
-    let image = tinygif::Gif::<ColorFormat>::from_slice(GIF_IMG).unwrap();
+pub async fn ui_background(gif_data: &[u8]) -> anyhow::Result<()> {
+    let image = tinygif::Gif::<ColorFormat>::from_slice(gif_data)
+        .map_err(|e| anyhow::anyhow!("invalid UI background GIF: {e:?}"))?;
 
     // Create a new framebuffer
     let mut display = FastFramebuffer::new();
@@ -606,14 +604,12 @@ fn list_display_text(text: &str, width: u32) -> String {
 }
 
 fn offset_terminal_dirty_rect(rect: Rectangle, offset_y: i32) -> Option<Rectangle> {
-    let rect = Rectangle::new(
-        rect.top_left + Point::new(0, offset_y),
-        rect.size,
-    )
-    .intersection(&Rectangle::new(
-        Point::zero(),
-        Size::new(DISPLAY_WIDTH as u32, DISPLAY_HEIGHT as u32),
-    ));
+    let rect = Rectangle::new(rect.top_left + Point::new(0, offset_y), rect.size).intersection(
+        &Rectangle::new(
+            Point::zero(),
+            Size::new(DISPLAY_WIDTH as u32, DISPLAY_HEIGHT as u32),
+        ),
+    );
     (rect.size.width > 0 && rect.size.height > 0).then_some(rect)
 }
 
@@ -637,7 +633,7 @@ pub struct UI {
     text: String,
     text_area: Rectangle,
     text_background: Vec<Pixel<ColorFormat>>,
-    status_gif: tinygif::Gif<'static, ColorFormat>,
+    status_gif: Option<tinygif::Gif<'static, ColorFormat>>,
 
     display: Box<FastFramebuffer>,
     terminal: TerminalState,
@@ -874,7 +870,7 @@ impl Default for UI {
     fn default() -> Self {
         let mut display = Box::new(FastFramebuffer::new());
 
-        display.clear(ColorFormat::WHITE).unwrap();
+        display.clear(ColorFormat::CSS_BLACK).unwrap();
 
         let state_area = Rectangle::new(
             display.bounding_box().center() + Point::new(-150, 150),
@@ -885,48 +881,8 @@ impl Default for UI {
             Size::new(300, 50 * 2),
         );
 
-        let image = tinygif::Gif::<ColorFormat>::from_slice(GIF_IMG).unwrap();
-        for frame in image.frames() {
-            frame.draw(display.as_mut()).unwrap();
-        }
-
-        let img = display.as_image();
-
-        let state_pixels: Vec<Pixel<ColorFormat>> = state_area
-            .into_styled(
-                PrimitiveStyleBuilder::new()
-                    .stroke_color(ColorFormat::CSS_STEEL_BLUE)
-                    .stroke_width(1)
-                    .fill_color(ColorFormat::CSS_STEEL_BLUE)
-                    .build(),
-            )
-            .pixels()
-            .map(|p| {
-                if let Some(color) = img.pixel(p.0) {
-                    Pixel(p.0, alpha_mix(color, p.1, ALPHA))
-                } else {
-                    p
-                }
-            })
-            .collect();
-
-        let box_pixels: Vec<Pixel<ColorFormat>> = text_area
-            .into_styled(
-                PrimitiveStyleBuilder::new()
-                    .stroke_color(ColorFormat::CSS_BLACK)
-                    .stroke_width(5)
-                    .fill_color(ColorFormat::CSS_BLACK)
-                    .build(),
-            )
-            .pixels()
-            .map(|p| {
-                if let Some(color) = img.pixel(p.0) {
-                    Pixel(p.0, alpha_mix(color, p.1, ALPHA))
-                } else {
-                    p
-                }
-            })
-            .collect();
+        let (state_pixels, box_pixels) =
+            status_text_backgrounds(display.as_ref(), state_area, text_area);
 
         Self {
             state: String::new(),
@@ -939,9 +895,55 @@ impl Default for UI {
             jpeg_screen: None,
             state_area,
             text_area,
-            status_gif: image,
+            status_gif: None,
         }
     }
+}
+
+fn status_text_backgrounds(
+    display: &FastFramebuffer,
+    state_area: Rectangle,
+    text_area: Rectangle,
+) -> (Vec<Pixel<ColorFormat>>, Vec<Pixel<ColorFormat>>) {
+    let img = display.as_image();
+
+    let state_pixels = state_area
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .stroke_color(ColorFormat::CSS_STEEL_BLUE)
+                .stroke_width(1)
+                .fill_color(ColorFormat::CSS_STEEL_BLUE)
+                .build(),
+        )
+        .pixels()
+        .map(|p| {
+            if let Some(color) = img.pixel(p.0) {
+                Pixel(p.0, alpha_mix(color, p.1, ALPHA))
+            } else {
+                p
+            }
+        })
+        .collect();
+
+    let box_pixels = text_area
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .stroke_color(ColorFormat::CSS_BLACK)
+                .stroke_width(5)
+                .fill_color(ColorFormat::CSS_BLACK)
+                .build(),
+        )
+        .pixels()
+        .map(|p| {
+            if let Some(color) = img.pixel(p.0) {
+                Pixel(p.0, alpha_mix(color, p.1, ALPHA))
+            } else {
+                p
+            }
+        })
+        .collect();
+
+    (state_pixels, box_pixels)
 }
 
 fn alpha_mix(source: ColorFormat, target: ColorFormat, alpha: f32) -> ColorFormat {
@@ -982,6 +984,21 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u64, u64) {
 }
 
 impl UI {
+    pub fn set_status_background_gif(&mut self, data: &'static [u8]) -> anyhow::Result<()> {
+        let image = tinygif::Gif::<ColorFormat>::from_slice(data)
+            .map_err(|e| anyhow::anyhow!("invalid status background GIF: {e:?}"))?;
+        self.display.clear(ColorFormat::WHITE)?;
+        for frame in image.frames() {
+            frame.draw(self.display.as_mut())?;
+        }
+        let (state_background, text_background) =
+            status_text_backgrounds(self.display.as_ref(), self.state_area, self.text_area);
+        self.state_background = state_background;
+        self.text_background = text_background;
+        self.status_gif = Some(image);
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub fn set_terminal_render_y_offset(&mut self, offset_y: i32) {
         self.terminal_render_y_offset = offset_y;
@@ -994,7 +1011,9 @@ impl UI {
         let session = self.terminal.ensure_session();
         let mut target = OffsetDrawTarget::new(self.display.as_mut(), 0);
         target.set_offset_y(self.terminal_render_y_offset);
-        session.renderer.render(session.parser.screen(), &mut target)?;
+        session
+            .renderer
+            .render(session.parser.screen(), &mut target)?;
         Ok(())
     }
 
@@ -1564,8 +1583,12 @@ impl UI {
 
     // 横向42个字符
     async fn display_flush(&mut self) -> anyhow::Result<()> {
-        for frame in self.status_gif.frames() {
-            frame.draw(self.display.as_mut())?;
+        if let Some(gif) = self.status_gif.as_ref() {
+            for frame in gif.frames() {
+                frame.draw(self.display.as_mut())?;
+            }
+        } else {
+            self.display.clear(ColorFormat::CSS_BLACK)?;
         }
 
         self.state_background
