@@ -241,6 +241,63 @@ impl DrawTarget for FastFramebuffer {
     }
 }
 
+struct OffsetDrawTarget<'a> {
+    inner: &'a mut FastFramebuffer,
+    offset_y: i32,
+}
+
+impl<'a> OffsetDrawTarget<'a> {
+    fn new(inner: &'a mut FastFramebuffer, offset_y: i32) -> Self {
+        Self { inner, offset_y }
+    }
+
+    fn set_offset_y(&mut self, offset_y: i32) {
+        self.offset_y = offset_y;
+    }
+
+    fn offset_point(&self, point: Point) -> Option<Point> {
+        let point = point + Point::new(0, self.offset_y);
+        self.inner.bounding_box().contains(point).then_some(point)
+    }
+
+    fn offset_rect(&self, rect: Rectangle) -> Option<Rectangle> {
+        let rect = Rectangle::new(rect.top_left + Point::new(0, self.offset_y), rect.size)
+            .intersection(&self.inner.bounding_box());
+        (rect.size.width > 0 && rect.size.height > 0).then_some(rect)
+    }
+}
+
+impl OriginDimensions for OffsetDrawTarget<'_> {
+    fn size(&self) -> Size {
+        self.inner.size()
+    }
+}
+
+impl DrawTarget for OffsetDrawTarget<'_> {
+    type Color = ColorFormat;
+    type Error = std::convert::Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        for Pixel(point, color) in pixels {
+            if let Some(point) = self.offset_point(point) {
+                self.inner.set_pixel_fast(point, color);
+            }
+        }
+        Ok(())
+    }
+
+    fn fill_solid(&mut self, area: &Rectangle, color: Self::Color) -> Result<(), Self::Error> {
+        if let Some(area) = self.offset_rect(*area) {
+            self.inner.fill_solid(&area, color)?;
+        }
+        Ok(())
+    }
+
+}
+
 fn fill_rgb565_be_row(row: &mut [u8], raw: u16) {
     debug_assert_eq!(row.len() % 2, 0);
 
@@ -351,6 +408,7 @@ const MENU_FOOTER_H: i32 = 24;
 const MENU_ITEM_H: u16 = (DISPLAY_HEIGHT as u16 - MENU_START_Y - MENU_FOOTER_H as u16) / MENU_ROWS;
 pub const MENU_TITLE_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 const TERMINAL_APPEND_RENDER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+pub const DEFAULT_TERMINAL_RENDER_Y_OFFSET: i32 = 7;
 
 fn build_version_label() -> &'static str {
     option_env!("VIBEKEYS_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
@@ -547,6 +605,18 @@ fn list_display_text(text: &str, width: u32) -> String {
     out
 }
 
+fn offset_terminal_dirty_rect(rect: Rectangle, offset_y: i32) -> Option<Rectangle> {
+    let rect = Rectangle::new(
+        rect.top_left + Point::new(0, offset_y),
+        rect.size,
+    )
+    .intersection(&Rectangle::new(
+        Point::zero(),
+        Size::new(DISPLAY_WIDTH as u32, DISPLAY_HEIGHT as u32),
+    ));
+    (rect.size.width > 0 && rect.size.height > 0).then_some(rect)
+}
+
 pub enum MainMenuSelection {
     Clock,
     Remote,
@@ -567,9 +637,11 @@ pub struct UI {
     text: String,
     text_area: Rectangle,
     text_background: Vec<Pixel<ColorFormat>>,
+    status_gif: tinygif::Gif<'static, ColorFormat>,
 
     display: Box<FastFramebuffer>,
     terminal: TerminalState,
+    terminal_render_y_offset: i32,
     jpeg_screen: Option<crate::new_jpg::JpegBufferu16>,
 }
 
@@ -863,9 +935,11 @@ impl Default for UI {
             text_background: box_pixels,
             display,
             terminal: TerminalState::new(),
+            terminal_render_y_offset: DEFAULT_TERMINAL_RENDER_Y_OFFSET,
             jpeg_screen: None,
             state_area,
             text_area,
+            status_gif: image,
         }
     }
 }
@@ -908,6 +982,33 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u64, u64) {
 }
 
 impl UI {
+    #[allow(dead_code)]
+    pub fn set_terminal_render_y_offset(&mut self, offset_y: i32) {
+        self.terminal_render_y_offset = offset_y;
+        if let Some(session) = self.terminal.session.as_mut() {
+            session.renderer.invalidate();
+        }
+    }
+
+    fn render_terminal_full_to_display(&mut self) -> anyhow::Result<()> {
+        let session = self.terminal.ensure_session();
+        let mut target = OffsetDrawTarget::new(self.display.as_mut(), 0);
+        target.set_offset_y(self.terminal_render_y_offset);
+        session.renderer.render(session.parser.screen(), &mut target)?;
+        Ok(())
+    }
+
+    fn render_terminal_diff_to_display(&mut self) -> anyhow::Result<Option<Rectangle>> {
+        let session = self.terminal.ensure_session();
+        let offset_y = self.terminal_render_y_offset;
+        let mut target = OffsetDrawTarget::new(self.display.as_mut(), 0);
+        target.set_offset_y(offset_y);
+        Ok(session
+            .renderer
+            .render_diff(session.parser.screen(), &mut target)?
+            .and_then(|rect| offset_terminal_dirty_rect(rect, offset_y)))
+    }
+
     pub async fn show_clock(&mut self) -> anyhow::Result<()> {
         let (year, month, day, hours, minutes) = current_clock_parts();
         self.display.clear(ColorFormat::CSS_BLACK)?;
@@ -1232,18 +1333,14 @@ impl UI {
     ) -> anyhow::Result<()> {
         let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
         let dirty = {
-            let session = self.terminal.ensure_session();
             if full_frame {
                 self.display.clear(ColorFormat::CSS_BLACK)?;
-                session
-                    .renderer
-                    .render(session.parser.screen(), self.display.as_mut())?;
+                self.render_terminal_full_to_display()?;
+                let session = self.terminal.ensure_session();
                 session.renderer.invalidate();
                 Some(self.display.bounding_box())
             } else {
-                session
-                    .renderer
-                    .render_diff(session.parser.screen(), self.display.as_mut())?
+                self.render_terminal_diff_to_display()?
             }
         };
         let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
@@ -1281,15 +1378,13 @@ impl UI {
         }
         self.terminal.append_render_deadline = None;
 
-        let Some(session) = self.terminal.session.as_mut() else {
+        if self.terminal.session.is_none() {
             return Ok(false);
-        };
+        }
         let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
-        let dirty = session
-            .renderer
-            .render_diff(session.parser.screen(), self.display.as_mut())?;
+        let dirty = self.render_terminal_diff_to_display()?;
         let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
-        let cache_len = session.renderer.cache_len();
+        let cache_len = self.terminal.ensure_session().renderer.cache_len();
 
         let flush_elapsed_us = match dirty {
             Some(rect) => self.flush_terminal_dirty(rect).await?.unwrap_or(0),
@@ -1307,16 +1402,15 @@ impl UI {
     }
 
     pub async fn redraw_cached_terminal_text(&mut self) -> anyhow::Result<bool> {
-        let Some(session) = self.terminal.session.as_mut() else {
+        if self.terminal.session.is_none() {
             return Ok(false);
-        };
+        }
         self.terminal.append_render_deadline = None;
 
         let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
         self.display.clear(ColorFormat::CSS_BLACK)?;
-        session
-            .renderer
-            .render(session.parser.screen(), self.display.as_mut())?;
+        self.render_terminal_full_to_display()?;
+        let session = self.terminal.ensure_session();
         session.renderer.invalidate();
         let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
         let cache_len = session.renderer.cache_len();
@@ -1470,8 +1564,7 @@ impl UI {
 
     // 横向42个字符
     async fn display_flush(&mut self) -> anyhow::Result<()> {
-        let image = tinygif::Gif::<ColorFormat>::from_slice(GIF_IMG).unwrap();
-        for frame in image.frames() {
+        for frame in self.status_gif.frames() {
             frame.draw(self.display.as_mut())?;
         }
 

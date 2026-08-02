@@ -61,6 +61,8 @@ pub struct ActiveSessionState {
     pub backspace_overlay: bool,
     pub menu_overlay: bool,
     pub clear_overlay: bool,
+    pub scroll_preview_y_offset: i32,
+    pub scroll_preview_redraw: bool,
     pub backspace_hold_sent: bool,
     pub last_backspace_sent_at: Option<tokio::time::Instant>,
     pub pending_text_frame: Option<Vec<u8>>,
@@ -315,6 +317,8 @@ impl AppState {
         self.active_session.backspace_overlay = false;
         self.active_session.menu_overlay = false;
         self.active_session.clear_overlay = false;
+        self.active_session.scroll_preview_y_offset = 0;
+        self.active_session.scroll_preview_redraw = false;
         self.active_session.backspace_hold_sent = false;
         self.active_session.last_backspace_sent_at = None;
         self.active_session.pending_text_frame = None;
@@ -424,6 +428,9 @@ impl AppState {
                 } else {
                     AppEventResult::none()
                 }
+            }
+            TouchGesture::SwipePreview { .. } | TouchGesture::SwipeCancel { .. } => {
+                AppEventResult::none()
             }
             TouchGesture::Swipe {
                 start,
@@ -551,9 +558,60 @@ impl AppState {
                     AppEventResult::none()
                 }
             }
+            TouchGesture::SwipePreview {
+                start,
+                current,
+                direction,
+                dy,
+                ..
+            } => {
+                let had_overlay =
+                    self.active_session.backspace_overlay || self.active_session.menu_overlay;
+                self.active_session.backspace_overlay = false;
+                self.active_session.menu_overlay = false;
+                self.active_session.clear_overlay = had_overlay;
+                self.active_session.backspace_hold_sent = false;
+                self.active_session.last_backspace_sent_at = None;
+
+                let next_offset = if matches!(
+                    direction,
+                    Some(crate::touch::SwipeDirection::Up | crate::touch::SwipeDirection::Down)
+                ) && scroll_swipe_message(start, current).is_some()
+                {
+                    dy
+                } else {
+                    0
+                };
+                if next_offset == self.active_session.scroll_preview_y_offset && !had_overlay {
+                    return AppEventResult::none();
+                }
+                self.active_session.scroll_preview_y_offset = next_offset;
+                self.active_session.scroll_preview_redraw = true;
+                AppEventResult::render()
+            }
+            TouchGesture::SwipeCancel { .. } => {
+                let had_overlay =
+                    self.active_session.backspace_overlay || self.active_session.menu_overlay;
+                let had_preview = self.active_session.scroll_preview_y_offset != 0;
+                self.active_session.backspace_overlay = false;
+                self.active_session.menu_overlay = false;
+                self.active_session.clear_overlay = had_overlay;
+                self.active_session.backspace_hold_sent = false;
+                self.active_session.last_backspace_sent_at = None;
+                self.active_session.scroll_preview_y_offset = 0;
+                self.active_session.scroll_preview_redraw = had_preview;
+                if had_overlay || had_preview {
+                    AppEventResult::render()
+                } else {
+                    AppEventResult::none()
+                }
+            }
             TouchGesture::Swipe { start, end, .. } => {
                 let had_overlay =
                     self.active_session.backspace_overlay || self.active_session.menu_overlay;
+                let had_preview = self.active_session.scroll_preview_y_offset != 0;
+                self.active_session.scroll_preview_y_offset = 0;
+                self.active_session.scroll_preview_redraw = had_preview;
                 self.active_session.backspace_overlay = false;
                 self.active_session.menu_overlay = false;
                 self.active_session.clear_overlay = had_overlay;
@@ -571,7 +629,7 @@ impl AppState {
                         ],
                     }
                 } else if let Some(msg) = scroll_swipe_message(start, end) {
-                    if had_overlay {
+                    if had_overlay || had_preview {
                         AppEventResult::render_with_effect(Effect::MqttPublish(msg))
                     } else {
                         AppEventResult::effect(Effect::MqttPublish(msg))
@@ -731,6 +789,10 @@ impl AppState {
             render_screen_chunk(gui, chunk).await?;
         }
         if let Some(frame) = self.active_session.pending_text_frame.take() {
+            gui.set_terminal_render_y_offset(
+                crate::ui::DEFAULT_TERMINAL_RENDER_Y_OFFSET
+                    + self.active_session.scroll_preview_y_offset,
+            );
             // log::info!("new UI screen text frame: {}B", frame.len());
             match screen_text_frame_kind(&frame) {
                 Some(ScreenTextFrameKind::Full) => {
@@ -750,6 +812,14 @@ impl AppState {
         if self.active_session.clear_overlay {
             redraw_active_cached_screen(gui).await?;
             self.active_session.clear_overlay = false;
+        }
+        if self.active_session.scroll_preview_redraw {
+            gui.set_terminal_render_y_offset(
+                crate::ui::DEFAULT_TERMINAL_RENDER_Y_OFFSET
+                    + self.active_session.scroll_preview_y_offset,
+            );
+            redraw_active_cached_screen(gui).await?;
+            self.active_session.scroll_preview_redraw = false;
         }
         if self.active_session.backspace_overlay {
             gui.show_session_backspace_overlay().await?;

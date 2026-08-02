@@ -35,6 +35,17 @@ pub enum TouchGesture {
         dx: i32,
         dy: i32,
     },
+    SwipePreview {
+        start: TouchPoint,
+        current: TouchPoint,
+        direction: Option<SwipeDirection>,
+        dx: i32,
+        dy: i32,
+    },
+    SwipeCancel {
+        start: TouchPoint,
+        end: TouchPoint,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -139,8 +150,16 @@ impl TouchInput {
                                 active.last_press = touch;
                                 let dx = touch.x as i32 - active.start.x as i32;
                                 let dy = touch.y as i32 - active.start.y as i32;
-                                if swipe_direction(threshold, dx, dy).is_some() {
+                                let direction = swipe_direction(threshold, dx, dy);
+                                if direction.is_some() || active.swipe_candidate.is_some() {
                                     active.swipe_candidate = Some(touch);
+                                    return Some(TouchGesture::SwipePreview {
+                                        start: active.start,
+                                        current: touch,
+                                        direction,
+                                        dx,
+                                        dy,
+                                    });
                                 }
                             }
                             TouchEvent::Release(end) => {
@@ -173,11 +192,10 @@ impl TouchInput {
         end: TouchPoint,
         swipe_candidate: Option<TouchPoint>,
     ) -> TouchGesture {
-        if let Some(candidate) = swipe_candidate {
-            return self.classify_swipe(start, end).unwrap_or_else(|| {
-                self.classify_swipe(start, candidate)
-                    .unwrap_or(TouchGesture::Click { start, end })
-            });
+        if swipe_candidate.is_some() {
+            return self
+                .classify_swipe(start, end)
+                .unwrap_or(TouchGesture::SwipeCancel { start, end });
         }
 
         self.classify_click_or_swipe(start, end)
