@@ -71,13 +71,7 @@ impl Setting {
             .unwrap_or_default();
         log::info!("Loaded {} wifi creds from NVS", wifi_list.len());
 
-        let mut url_buf = [0u8; 128];
-        let server_url = nvs
-            .get_str("server_url", &mut url_buf)
-            .ok()
-            .flatten()
-            .unwrap_or("")
-            .to_string();
+        let server_url = load_nvs_string(nvs, "server_url")?.unwrap_or_default();
 
         let timezone_offset_secs = nvs
             .get_i32(TIMEZONE_OFFSET_SECS_KEY)
@@ -97,4 +91,16 @@ impl Setting {
     pub fn need_init(&self) -> bool {
         self.wifi_list.is_empty() || self.server_url.is_empty()
     }
+}
+
+fn load_nvs_string(nvs: &EspDefaultNvs, key: &str) -> anyhow::Result<Option<String>> {
+    let Some(len) = nvs.str_len(key)? else {
+        return Ok(None);
+    };
+    if len == 0 {
+        return Ok(Some(String::new()));
+    }
+
+    let mut buf = vec![0u8; len];
+    Ok(nvs.get_str(key, &mut buf)?.map(str::to_string))
 }
