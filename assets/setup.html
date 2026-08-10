@@ -54,9 +54,9 @@
                             <h3 class="card-title text-lg" id="urlTitle">VibeWatch Server</h3>
                             <label class="form-control">
                                 <div class="label">
-                                    <span class="label-text">WebSocket URL</span>
+                                    <span class="label-text">MQTT Broker URL</span>
                                 </div>
-                                <input type="text" id="serverUrlInput" placeholder="VibeWatch server WebSocket URL"
+                                <input type="text" id="serverUrlInput" placeholder="mqtt://user:pass@host:1883"
                                     class="input input-bordered w-full">
                             </label>
                         </div>
@@ -169,6 +169,9 @@
         const BACKGROUND_ID = "3d5a6f16-6e71-4f17-9e61-2f4c1b8f0b23";
         const RESET_ID = "f0e1d2c3-b4a5-6789-0abc-def123456789";
         const MAX_AUDIO_BYTES = 256 * 1024;
+        const WATCH_BACKGROUND_WIDTH = 410;
+        const WATCH_BACKGROUND_HEIGHT = 502;
+        const MAX_BACKGROUND_SOURCE_BYTES = 512 * 1024;
         const MAX_BACKGROUND_BYTES = 128 * 1024;
 
         // global variables
@@ -691,22 +694,99 @@
             if (file.size === 0) {
                 throw new Error('The GIF file is empty');
             }
-            if (file.size > MAX_BACKGROUND_BYTES) {
-                throw new Error('The GIF file size cannot exceed 128KB');
+            if (file.size > MAX_BACKGROUND_SOURCE_BYTES) {
+                throw new Error('The source GIF file size cannot exceed 512KB');
             }
             if (!file.name.toLowerCase().endsWith('.gif')) {
                 throw new Error('Please select a .gif file');
             }
         }
 
-        async function readBackgroundGif(file) {
+        async function prepareBackgroundGif(file) {
             validateBackgroundFile(file);
-            const data = new Uint8Array(await file.arrayBuffer());
+            const source = await file.arrayBuffer();
+            const data = new Uint8Array(source);
             const header = String.fromCharCode(...data.slice(0, 6));
             if (header !== 'GIF87a' && header !== 'GIF89a') {
                 throw new Error('Invalid GIF file header');
             }
-            return data;
+            const frames = await decodeGifFrames(source);
+            const scaled = await encodeScaledGif(frames);
+            if (scaled.byteLength > MAX_BACKGROUND_BYTES) {
+                throw new Error(`Scaled GIF is ${Math.round(scaled.byteLength / 1024)}KB; maximum is 128KB`);
+            }
+            return scaled;
+        }
+
+        async function decodeGifFrames(source) {
+            if (!('ImageDecoder' in window)) {
+                throw new Error('This browser cannot decode animated GIF frames. Please use Chrome or Edge.');
+            }
+            const decoder = new ImageDecoder({
+                data: source.slice(0),
+                type: 'image/gif'
+            });
+            await decoder.tracks.ready;
+            const frameCount = decoder.tracks.selectedTrack.frameCount || 1;
+            const frames = [];
+            for (let i = 0; i < frameCount; i++) {
+                const result = await decoder.decode({ frameIndex: i });
+                const image = result.image;
+                frames.push({
+                    image,
+                    width: image.displayWidth,
+                    height: image.displayHeight,
+                    delay: Math.max(20, Math.round((image.duration || 100000) / 1000)),
+                    close: () => image.close()
+                });
+                if (frames.length >= 60) break;
+            }
+            return frames;
+        }
+
+        async function encodeScaledGif(frames) {
+            if (!frames.length) {
+                throw new Error('GIF contains no frames');
+            }
+            const { GIFEncoder, quantize, applyPalette } = await import('https://esm.sh/gifenc@1.0.3');
+            const gif = GIFEncoder();
+            const canvas = document.createElement('canvas');
+            canvas.width = WATCH_BACKGROUND_WIDTH;
+            canvas.height = WATCH_BACKGROUND_HEIGHT;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+            try {
+                for (const frame of frames) {
+                    ctx.fillStyle = '#000000';
+                    ctx.fillRect(0, 0, WATCH_BACKGROUND_WIDTH, WATCH_BACKGROUND_HEIGHT);
+                    drawCover(ctx, frame.image, frame.width, frame.height);
+
+                    const pixels = ctx.getImageData(0, 0, WATCH_BACKGROUND_WIDTH, WATCH_BACKGROUND_HEIGHT).data;
+                    const palette = quantize(pixels, 256);
+                    const index = applyPalette(pixels, palette);
+                    gif.writeFrame(index, WATCH_BACKGROUND_WIDTH, WATCH_BACKGROUND_HEIGHT, {
+                        palette,
+                        delay: frame.delay
+                    });
+                }
+            } finally {
+                frames.forEach(frame => frame.close());
+            }
+
+            gif.finish();
+            return gif.bytes();
+        }
+
+        function drawCover(ctx, image, sourceWidth, sourceHeight) {
+            const scale = Math.max(
+                WATCH_BACKGROUND_WIDTH / sourceWidth,
+                WATCH_BACKGROUND_HEIGHT / sourceHeight
+            );
+            const drawWidth = sourceWidth * scale;
+            const drawHeight = sourceHeight * scale;
+            const dx = (WATCH_BACKGROUND_WIDTH - drawWidth) / 2;
+            const dy = (WATCH_BACKGROUND_HEIGHT - drawHeight) / 2;
+            ctx.drawImage(image, dx, dy, drawWidth, drawHeight);
         }
 
         async function uploadBackgroundFile() {
@@ -717,8 +797,9 @@
 
             const file = backgroundFileInput.files[0];
             try {
-                const data = await readBackgroundGif(file);
                 uploadBackgroundButton.disabled = true;
+                uploadBackgroundButton.textContent = 'Scaling...';
+                const data = await prepareBackgroundGif(file);
                 uploadBackgroundButton.textContent = 'Uploading... 0%';
 
                 const characteristic = await service.getCharacteristic(BACKGROUND_ID);
@@ -737,7 +818,7 @@
                     await new Promise(resolve => setTimeout(resolve, 20));
                 }
 
-                backgroundFileStatus.textContent = `${file.name} uploaded (${Math.round(data.byteLength / 1024)}KB GIF)`;
+                backgroundFileStatus.textContent = `${file.name} scaled and uploaded (${Math.round(data.byteLength / 1024)}KB GIF)`;
                 showNotification('Success', 'Background uploaded. Restart device to apply it.');
             } catch (error) {
                 console.error('Background upload failed:', error);
