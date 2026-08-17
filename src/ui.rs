@@ -1098,22 +1098,6 @@ impl UI {
             _ => ColorFormat::CSS_WHEAT,
         };
 
-        let outer = Rectangle::new(
-            Point::new(2, 2),
-            Size::new(
-                (DISPLAY_WIDTH as u32).saturating_sub(4),
-                (DISPLAY_HEIGHT as u32).saturating_sub(4),
-            ),
-        );
-        outer
-            .into_styled(
-                PrimitiveStyleBuilder::new()
-                    .stroke_color(record_color)
-                    .stroke_width(3)
-                    .build(),
-            )
-            .draw(display)?;
-
         let top_h = 80;
         let top_labels = ["Left", "Del", "Right"];
         for (i, label) in top_labels.iter().enumerate() {
@@ -1152,6 +1136,14 @@ impl UI {
                 (enter_top - top_h - 8).max(24) as u32,
             ),
         );
+        content_rect
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .stroke_color(record_color)
+                    .stroke_width(3)
+                    .build(),
+            )
+            .draw(display)?;
         let content_style = embedded_text::style::TextBoxStyleBuilder::new()
             .height_mode(embedded_text::style::HeightMode::FitToText)
             .alignment(embedded_text::alignment::HorizontalAlignment::Left)
@@ -1166,39 +1158,52 @@ impl UI {
         )
         .draw(display)?;
 
-        let record_rect = Rectangle::new(
-            Point::new(12, enter_top + 8),
-            Size::new((DISPLAY_WIDTH as u32).saturating_sub(24), 60),
-        );
-        record_rect
-            .into_styled(
+        let bottom_left = 12;
+        let bottom_gap = 6;
+        let bottom_w = ((DISPLAY_WIDTH as i32 - bottom_left * 2 - bottom_gap * 2) / 3).max(1);
+        let bottom_labels = [
+            "Confirm".to_string(),
+            format!("Record\n{hint}"),
+            "Cancel".to_string(),
+        ];
+        let hint_style = embedded_text::style::TextBoxStyleBuilder::new()
+            .height_mode(embedded_text::style::HeightMode::FitToText)
+            .alignment(embedded_text::alignment::HorizontalAlignment::Center)
+            .line_height(embedded_graphics::text::LineHeight::Pixels(18))
+            .build();
+        for (i, label) in bottom_labels.iter().enumerate() {
+            let x = bottom_left + i as i32 * (bottom_w + bottom_gap);
+            let w = if i == 2 {
+                DISPLAY_WIDTH as i32 - bottom_left - x
+            } else {
+                bottom_w
+            };
+            let rect = Rectangle::new(Point::new(x, enter_top + 8), Size::new(w as u32, 60));
+            let color = if i == 1 {
+                record_color
+            } else {
+                ColorFormat::CSS_WHEAT
+            };
+            rect.into_styled(
                 PrimitiveStyleBuilder::new()
-                    .stroke_color(record_color)
+                    .stroke_color(color)
                     .stroke_width(3)
                     .build(),
             )
             .draw(display)?;
 
-        let hint_rect = Rectangle::new(
-            Point::new(12, enter_top + 22),
-            Size::new((DISPLAY_WIDTH as u32).saturating_sub(24), 32),
-        );
-        let hint_style = embedded_text::style::TextBoxStyleBuilder::new()
-            .height_mode(embedded_text::style::HeightMode::FitToText)
-            .alignment(embedded_text::alignment::HorizontalAlignment::Center)
-            .line_height(embedded_graphics::text::LineHeight::Pixels(20))
-            .build();
-        TextBox::with_textbox_style(
-            &format!("Record  {hint}"),
-            hint_rect,
-            shifted_text_style(
-                u8g2_fonts::fonts::u8g2_font_wqy12_t_gb2312a,
-                record_color,
-                3,
-            ),
-            hint_style,
-        )
-        .draw(display)?;
+            let text_rect = Rectangle::new(
+                rect.top_left + Point::new(4, if i == 1 { 10 } else { 18 }),
+                Size::new(rect.size.width.saturating_sub(8), 40),
+            );
+            TextBox::with_textbox_style(
+                label,
+                text_rect,
+                shifted_text_style(u8g2_fonts::fonts::u8g2_font_wqy12_t_gb2312a, color, 3),
+                hint_style,
+            )
+            .draw(display)?;
+        }
 
         let e = crate::lcd::async_flush_display(
             self.display.data(),
