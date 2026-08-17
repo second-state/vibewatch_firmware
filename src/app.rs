@@ -442,8 +442,8 @@ impl AppState {
                 self.sessions.boot_long_press_count = 0;
                 match direction {
                     crate::touch::SwipeDirection::Right => {
-                        log::info!("new UI session list right swipe detected, refreshing");
-                        AppEventResult::render()
+                        log::info!("new UI session list right swipe detected, opening system menu");
+                        AppEventResult::effect(Effect::OpenBootMenu)
                     }
                     crate::touch::SwipeDirection::Up | crate::touch::SwipeDirection::Down => {
                         let Some(delta) = list_scroll_delta(start, end) else {
