@@ -1,6 +1,6 @@
 [package]
 name = "vibewatch"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["csh <458761603@qq.com>"]
 edition = "2021"
 resolver = "2"
