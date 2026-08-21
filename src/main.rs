@@ -2,6 +2,7 @@ use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::reset::restart};
 
 mod app;
 mod audio;
+mod background;
 mod ble_provision;
 mod boot;
 mod lcd;
@@ -66,8 +67,16 @@ fn main() -> anyhow::Result<()> {
     }
     // ===
 
-    runtime.block_on(ui::ui_background()).ok();
+    let background_gif = background::load_from_nvs(&nvs);
+    if let Some(background_gif) = background_gif {
+        runtime.block_on(ui::ui_background(background_gif)).ok();
+    }
     let mut gui = ui::UI::default();
+    if let Some(background_gif) = background_gif {
+        if let Err(e) = gui.set_status_background_gif(background_gif) {
+            log::error!("Failed to apply custom background GIF: {e:?}");
+        }
+    }
 
     // A/B 双槽 OTA:标记当前启动槽为有效(确认本次正常启动;配合回滚机制)。
     {

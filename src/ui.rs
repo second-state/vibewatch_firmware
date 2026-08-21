@@ -8,7 +8,7 @@ use embedded_graphics::{
         Rgb565, RgbColor,
     },
     prelude::*,
-    primitives::{Line, PrimitiveStyleBuilder, Rectangle},
+    primitives::{Line, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, Triangle},
     text::{Alignment, Text},
 };
 use embedded_text::TextBox;
@@ -17,8 +17,6 @@ use std::sync::{
     OnceLock,
 };
 use u8g2_fonts::U8g2TextStyle;
-
-const GIF_IMG: &[u8] = include_bytes!("../assets/ht.gif");
 
 pub type UiColor = Rgb565;
 type ColorFormat = UiColor;
@@ -133,6 +131,144 @@ fn shifted_text_style(
     }
 }
 
+fn draw_microphone_icon<D>(
+    target: &mut D,
+    center: Point,
+    color: ColorFormat,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = ColorFormat>,
+{
+    let style = PrimitiveStyleBuilder::new()
+        .stroke_color(color)
+        .stroke_width(3)
+        .build();
+
+    RoundedRectangle::with_equal_corners(
+        Rectangle::new(center + Point::new(-10, -20), Size::new(20, 28)),
+        Size::new(10, 10),
+    )
+    .into_styled(style)
+    .draw(target)?;
+    Line::new(center + Point::new(-18, -3), center + Point::new(-18, 4))
+        .into_styled(style)
+        .draw(target)?;
+    Line::new(center + Point::new(18, -3), center + Point::new(18, 4))
+        .into_styled(style)
+        .draw(target)?;
+    Line::new(center + Point::new(-18, 4), center + Point::new(-10, 13))
+        .into_styled(style)
+        .draw(target)?;
+    Line::new(center + Point::new(18, 4), center + Point::new(10, 13))
+        .into_styled(style)
+        .draw(target)?;
+    Line::new(center + Point::new(0, 13), center + Point::new(0, 22))
+        .into_styled(style)
+        .draw(target)?;
+    Line::new(center + Point::new(-10, 22), center + Point::new(10, 22))
+        .into_styled(style)
+        .draw(target)?;
+
+    Ok(())
+}
+
+fn draw_arrow_icon<D>(
+    target: &mut D,
+    center: Point,
+    direction: crate::touch::SwipeDirection,
+    color: ColorFormat,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = ColorFormat>,
+{
+    let style = PrimitiveStyleBuilder::new().fill_color(color).build();
+    let triangle = match direction {
+        crate::touch::SwipeDirection::Left => Triangle::new(
+            center + Point::new(-15, 0),
+            center + Point::new(12, -16),
+            center + Point::new(12, 16),
+        ),
+        crate::touch::SwipeDirection::Right => Triangle::new(
+            center + Point::new(15, 0),
+            center + Point::new(-12, -16),
+            center + Point::new(-12, 16),
+        ),
+        crate::touch::SwipeDirection::Up => Triangle::new(
+            center + Point::new(0, -15),
+            center + Point::new(-16, 12),
+            center + Point::new(16, 12),
+        ),
+        crate::touch::SwipeDirection::Down => Triangle::new(
+            center + Point::new(0, 15),
+            center + Point::new(-16, -12),
+            center + Point::new(16, -12),
+        ),
+    };
+    triangle.into_styled(style).draw(target)?;
+    Ok(())
+}
+
+fn draw_backspace_icon<D>(target: &mut D, center: Point, color: ColorFormat) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = ColorFormat>,
+{
+    let style = PrimitiveStyleBuilder::new()
+        .stroke_color(color)
+        .stroke_width(4)
+        .build();
+    let x0 = center.x - 24;
+    let x1 = center.x + 26;
+    let y0 = center.y - 14;
+    let y1 = center.y;
+    let y2 = center.y + 14;
+    for line in [
+        Line::new(Point::new(x0, y1), Point::new(x1, y1)),
+        Line::new(Point::new(x0, y1), Point::new(x0 + 16, y0)),
+        Line::new(Point::new(x0, y1), Point::new(x0 + 16, y2)),
+    ] {
+        line.into_styled(style).draw(target)?;
+    }
+    Ok(())
+}
+
+fn draw_submit_icon<D>(target: &mut D, center: Point, color: ColorFormat) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = ColorFormat>,
+{
+    draw_arrow_icon(
+        target,
+        center + Point::new(0, -4),
+        crate::touch::SwipeDirection::Up,
+        color,
+    )?;
+    Line::new(center + Point::new(-18, 20), center + Point::new(18, 20))
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .stroke_color(color)
+                .stroke_width(4)
+                .build(),
+        )
+        .draw(target)?;
+    Ok(())
+}
+
+fn draw_cancel_icon<D>(target: &mut D, center: Point, color: ColorFormat) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = ColorFormat>,
+{
+    let style = PrimitiveStyleBuilder::new()
+        .stroke_color(color)
+        .stroke_width(4)
+        .build();
+    Line::new(center + Point::new(-16, -16), center + Point::new(16, 16))
+        .into_styled(style)
+        .draw(target)?;
+    Line::new(center + Point::new(16, -16), center + Point::new(-16, 16))
+        .into_styled(style)
+        .draw(target)?;
+    Ok(())
+}
+
 type DisplayFramebuffer = Framebuffer<
     ColorFormat,
     RawU16,
@@ -241,6 +377,62 @@ impl DrawTarget for FastFramebuffer {
     }
 }
 
+struct OffsetDrawTarget<'a> {
+    inner: &'a mut FastFramebuffer,
+    offset_y: i32,
+}
+
+impl<'a> OffsetDrawTarget<'a> {
+    fn new(inner: &'a mut FastFramebuffer, offset_y: i32) -> Self {
+        Self { inner, offset_y }
+    }
+
+    fn set_offset_y(&mut self, offset_y: i32) {
+        self.offset_y = offset_y;
+    }
+
+    fn offset_point(&self, point: Point) -> Option<Point> {
+        let point = point + Point::new(0, self.offset_y);
+        self.inner.bounding_box().contains(point).then_some(point)
+    }
+
+    fn offset_rect(&self, rect: Rectangle) -> Option<Rectangle> {
+        let rect = Rectangle::new(rect.top_left + Point::new(0, self.offset_y), rect.size)
+            .intersection(&self.inner.bounding_box());
+        (rect.size.width > 0 && rect.size.height > 0).then_some(rect)
+    }
+}
+
+impl OriginDimensions for OffsetDrawTarget<'_> {
+    fn size(&self) -> Size {
+        self.inner.size()
+    }
+}
+
+impl DrawTarget for OffsetDrawTarget<'_> {
+    type Color = ColorFormat;
+    type Error = std::convert::Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        for Pixel(point, color) in pixels {
+            if let Some(point) = self.offset_point(point) {
+                self.inner.set_pixel_fast(point, color);
+            }
+        }
+        Ok(())
+    }
+
+    fn fill_solid(&mut self, area: &Rectangle, color: Self::Color) -> Result<(), Self::Error> {
+        if let Some(area) = self.offset_rect(*area) {
+            self.inner.fill_solid(&area, color)?;
+        }
+        Ok(())
+    }
+}
+
 fn fill_rgb565_be_row(row: &mut [u8], raw: u16) {
     debug_assert_eq!(row.len() % 2, 0);
 
@@ -272,8 +464,9 @@ fn rgb565_be(color: ColorFormat) -> [u8; 2] {
     RawU16::from(color).into_inner().to_be_bytes()
 }
 
-pub async fn ui_background() -> Result<(), std::convert::Infallible> {
-    let image = tinygif::Gif::<ColorFormat>::from_slice(GIF_IMG).unwrap();
+pub async fn ui_background(gif_data: &[u8]) -> anyhow::Result<()> {
+    let image = tinygif::Gif::<ColorFormat>::from_slice(gif_data)
+        .map_err(|e| anyhow::anyhow!("invalid UI background GIF: {e:?}"))?;
 
     // Create a new framebuffer
     let mut display = FastFramebuffer::new();
@@ -351,6 +544,7 @@ const MENU_FOOTER_H: i32 = 24;
 const MENU_ITEM_H: u16 = (DISPLAY_HEIGHT as u16 - MENU_START_Y - MENU_FOOTER_H as u16) / MENU_ROWS;
 pub const MENU_TITLE_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 const TERMINAL_APPEND_RENDER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+pub const DEFAULT_TERMINAL_RENDER_Y_OFFSET: i32 = 7;
 
 fn build_version_label() -> &'static str {
     option_env!("VIBEKEYS_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
@@ -547,6 +741,16 @@ fn list_display_text(text: &str, width: u32) -> String {
     out
 }
 
+fn offset_terminal_dirty_rect(rect: Rectangle, offset_y: i32) -> Option<Rectangle> {
+    let rect = Rectangle::new(rect.top_left + Point::new(0, offset_y), rect.size).intersection(
+        &Rectangle::new(
+            Point::zero(),
+            Size::new(DISPLAY_WIDTH as u32, DISPLAY_HEIGHT as u32),
+        ),
+    );
+    (rect.size.width > 0 && rect.size.height > 0).then_some(rect)
+}
+
 pub enum MainMenuSelection {
     Clock,
     Remote,
@@ -567,9 +771,11 @@ pub struct UI {
     text: String,
     text_area: Rectangle,
     text_background: Vec<Pixel<ColorFormat>>,
+    status_gif: Option<tinygif::Gif<'static, ColorFormat>>,
 
     display: Box<FastFramebuffer>,
     terminal: TerminalState,
+    terminal_render_y_offset: i32,
     jpeg_screen: Option<crate::new_jpg::JpegBufferu16>,
 }
 
@@ -802,7 +1008,7 @@ impl Default for UI {
     fn default() -> Self {
         let mut display = Box::new(FastFramebuffer::new());
 
-        display.clear(ColorFormat::WHITE).unwrap();
+        display.clear(ColorFormat::CSS_BLACK).unwrap();
 
         let state_area = Rectangle::new(
             display.bounding_box().center() + Point::new(-150, 150),
@@ -813,48 +1019,8 @@ impl Default for UI {
             Size::new(300, 50 * 2),
         );
 
-        let image = tinygif::Gif::<ColorFormat>::from_slice(GIF_IMG).unwrap();
-        for frame in image.frames() {
-            frame.draw(display.as_mut()).unwrap();
-        }
-
-        let img = display.as_image();
-
-        let state_pixels: Vec<Pixel<ColorFormat>> = state_area
-            .into_styled(
-                PrimitiveStyleBuilder::new()
-                    .stroke_color(ColorFormat::CSS_STEEL_BLUE)
-                    .stroke_width(1)
-                    .fill_color(ColorFormat::CSS_STEEL_BLUE)
-                    .build(),
-            )
-            .pixels()
-            .map(|p| {
-                if let Some(color) = img.pixel(p.0) {
-                    Pixel(p.0, alpha_mix(color, p.1, ALPHA))
-                } else {
-                    p
-                }
-            })
-            .collect();
-
-        let box_pixels: Vec<Pixel<ColorFormat>> = text_area
-            .into_styled(
-                PrimitiveStyleBuilder::new()
-                    .stroke_color(ColorFormat::CSS_BLACK)
-                    .stroke_width(5)
-                    .fill_color(ColorFormat::CSS_BLACK)
-                    .build(),
-            )
-            .pixels()
-            .map(|p| {
-                if let Some(color) = img.pixel(p.0) {
-                    Pixel(p.0, alpha_mix(color, p.1, ALPHA))
-                } else {
-                    p
-                }
-            })
-            .collect();
+        let (state_pixels, box_pixels) =
+            status_text_backgrounds(display.as_ref(), state_area, text_area);
 
         Self {
             state: String::new(),
@@ -863,11 +1029,59 @@ impl Default for UI {
             text_background: box_pixels,
             display,
             terminal: TerminalState::new(),
+            terminal_render_y_offset: DEFAULT_TERMINAL_RENDER_Y_OFFSET,
             jpeg_screen: None,
             state_area,
             text_area,
+            status_gif: None,
         }
     }
+}
+
+fn status_text_backgrounds(
+    display: &FastFramebuffer,
+    state_area: Rectangle,
+    text_area: Rectangle,
+) -> (Vec<Pixel<ColorFormat>>, Vec<Pixel<ColorFormat>>) {
+    let img = display.as_image();
+
+    let state_pixels = state_area
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .stroke_color(ColorFormat::CSS_STEEL_BLUE)
+                .stroke_width(1)
+                .fill_color(ColorFormat::CSS_STEEL_BLUE)
+                .build(),
+        )
+        .pixels()
+        .map(|p| {
+            if let Some(color) = img.pixel(p.0) {
+                Pixel(p.0, alpha_mix(color, p.1, ALPHA))
+            } else {
+                p
+            }
+        })
+        .collect();
+
+    let box_pixels = text_area
+        .into_styled(
+            PrimitiveStyleBuilder::new()
+                .stroke_color(ColorFormat::CSS_BLACK)
+                .stroke_width(5)
+                .fill_color(ColorFormat::CSS_BLACK)
+                .build(),
+        )
+        .pixels()
+        .map(|p| {
+            if let Some(color) = img.pixel(p.0) {
+                Pixel(p.0, alpha_mix(color, p.1, ALPHA))
+            } else {
+                p
+            }
+        })
+        .collect();
+
+    (state_pixels, box_pixels)
 }
 
 fn alpha_mix(source: ColorFormat, target: ColorFormat, alpha: f32) -> ColorFormat {
@@ -908,6 +1122,50 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u64, u64) {
 }
 
 impl UI {
+    pub fn set_status_background_gif(&mut self, data: &'static [u8]) -> anyhow::Result<()> {
+        let image = tinygif::Gif::<ColorFormat>::from_slice(data)
+            .map_err(|e| anyhow::anyhow!("invalid status background GIF: {e:?}"))?;
+        self.display.clear(ColorFormat::WHITE)?;
+        for frame in image.frames() {
+            frame.draw(self.display.as_mut())?;
+        }
+        let (state_background, text_background) =
+            status_text_backgrounds(self.display.as_ref(), self.state_area, self.text_area);
+        self.state_background = state_background;
+        self.text_background = text_background;
+        self.status_gif = Some(image);
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn set_terminal_render_y_offset(&mut self, offset_y: i32) {
+        self.terminal_render_y_offset = offset_y;
+        if let Some(session) = self.terminal.session.as_mut() {
+            session.renderer.invalidate();
+        }
+    }
+
+    fn render_terminal_full_to_display(&mut self) -> anyhow::Result<()> {
+        let session = self.terminal.ensure_session();
+        let mut target = OffsetDrawTarget::new(self.display.as_mut(), 0);
+        target.set_offset_y(self.terminal_render_y_offset);
+        session
+            .renderer
+            .render(session.parser.screen(), &mut target)?;
+        Ok(())
+    }
+
+    fn render_terminal_diff_to_display(&mut self) -> anyhow::Result<Option<Rectangle>> {
+        let session = self.terminal.ensure_session();
+        let offset_y = self.terminal_render_y_offset;
+        let mut target = OffsetDrawTarget::new(self.display.as_mut(), 0);
+        target.set_offset_y(offset_y);
+        Ok(session
+            .renderer
+            .render_diff(session.parser.screen(), &mut target)?
+            .and_then(|rect| offset_terminal_dirty_rect(rect, offset_y)))
+    }
+
     pub async fn show_clock(&mut self) -> anyhow::Result<()> {
         let (year, month, day, hours, minutes) = current_clock_parts();
         self.display.clear(ColorFormat::CSS_BLACK)?;
@@ -978,25 +1236,8 @@ impl UI {
             _ => ColorFormat::CSS_WHEAT,
         };
 
-        let outer = Rectangle::new(
-            Point::new(2, 2),
-            Size::new(
-                (DISPLAY_WIDTH as u32).saturating_sub(4),
-                (DISPLAY_HEIGHT as u32).saturating_sub(4),
-            ),
-        );
-        outer
-            .into_styled(
-                PrimitiveStyleBuilder::new()
-                    .stroke_color(record_color)
-                    .stroke_width(3)
-                    .build(),
-            )
-            .draw(display)?;
-
         let top_h = 80;
-        let top_labels = ["Left", "Del", "Right"];
-        for (i, label) in top_labels.iter().enumerate() {
+        for i in 0..3 {
             let x = (DISPLAY_WIDTH / 3 * i) as i32;
             let w = if i == 2 {
                 DISPLAY_WIDTH - DISPLAY_WIDTH / 3 * 2
@@ -1011,17 +1252,11 @@ impl UI {
                     .build(),
             )
             .draw(display)?;
-            Text::with_alignment(
-                label,
-                rect.center() + Point::new(0, 6),
-                shifted_text_style(
-                    u8g2_fonts::fonts::u8g2_font_wqy12_t_gb2312a,
-                    ColorFormat::CSS_WHEAT,
-                    3,
-                ),
-                Alignment::Center,
-            )
-            .draw(display)?;
+            match i {
+                0 => draw_backspace_icon(display, rect.center(), ColorFormat::CSS_WHEAT)?,
+                1 => draw_submit_icon(display, rect.center(), ColorFormat::CSS_WHEAT)?,
+                _ => draw_cancel_icon(display, rect.center(), ColorFormat::CSS_WHEAT)?,
+            }
         }
 
         let enter_top = DISPLAY_HEIGHT as i32 - 80;
@@ -1032,6 +1267,18 @@ impl UI {
                 (enter_top - top_h - 8).max(24) as u32,
             ),
         );
+        let content_border_rect = Rectangle::new(
+            content_rect.top_left - Point::new(2, 2),
+            Size::new(content_rect.size.width + 4, content_rect.size.height + 4),
+        );
+        content_border_rect
+            .into_styled(
+                PrimitiveStyleBuilder::new()
+                    .stroke_color(record_color)
+                    .stroke_width(3)
+                    .build(),
+            )
+            .draw(display)?;
         let content_style = embedded_text::style::TextBoxStyleBuilder::new()
             .height_mode(embedded_text::style::HeightMode::FitToText)
             .alignment(embedded_text::alignment::HorizontalAlignment::Left)
@@ -1046,39 +1293,75 @@ impl UI {
         )
         .draw(display)?;
 
-        let record_rect = Rectangle::new(
-            Point::new(12, enter_top + 8),
-            Size::new((DISPLAY_WIDTH as u32).saturating_sub(24), 60),
-        );
-        record_rect
-            .into_styled(
+        let bottom_left = 12;
+        let bottom_gap = 6;
+        let bottom_w = ((DISPLAY_WIDTH as i32 - bottom_left * 2 - bottom_gap * 2) / 3).max(1);
+        let bottom_labels = ["Left", "", "Right"];
+        let hint_style = embedded_text::style::TextBoxStyleBuilder::new()
+            .height_mode(embedded_text::style::HeightMode::FitToText)
+            .alignment(embedded_text::alignment::HorizontalAlignment::Center)
+            .line_height(embedded_graphics::text::LineHeight::Pixels(18))
+            .build();
+        for (i, label) in bottom_labels.iter().enumerate() {
+            let x = bottom_left + i as i32 * (bottom_w + bottom_gap);
+            let w = if i == 2 {
+                DISPLAY_WIDTH as i32 - bottom_left - x
+            } else {
+                bottom_w
+            };
+            let button_top = if i == 1 {
+                content_border_rect.top_left.y + content_border_rect.size.height as i32 - 1
+            } else {
+                enter_top + 8
+            };
+            let button_bottom = enter_top + 68;
+            let rect = Rectangle::new(
+                Point::new(x, button_top),
+                Size::new(w as u32, (button_bottom - button_top).max(1) as u32),
+            );
+            let color = if i == 1 {
+                record_color
+            } else {
+                ColorFormat::CSS_WHEAT
+            };
+            rect.into_styled(
                 PrimitiveStyleBuilder::new()
-                    .stroke_color(record_color)
+                    .stroke_color(color)
                     .stroke_width(3)
                     .build(),
             )
             .draw(display)?;
 
-        let hint_rect = Rectangle::new(
-            Point::new(12, enter_top + 22),
-            Size::new((DISPLAY_WIDTH as u32).saturating_sub(24), 32),
-        );
-        let hint_style = embedded_text::style::TextBoxStyleBuilder::new()
-            .height_mode(embedded_text::style::HeightMode::FitToText)
-            .alignment(embedded_text::alignment::HorizontalAlignment::Center)
-            .line_height(embedded_graphics::text::LineHeight::Pixels(20))
-            .build();
-        TextBox::with_textbox_style(
-            &format!("Record  {hint}"),
-            hint_rect,
-            shifted_text_style(
-                u8g2_fonts::fonts::u8g2_font_wqy12_t_gb2312a,
-                record_color,
-                3,
-            ),
-            hint_style,
-        )
-        .draw(display)?;
+            if i == 0 {
+                draw_arrow_icon(
+                    display,
+                    rect.center() + Point::new(0, 2),
+                    crate::touch::SwipeDirection::Left,
+                    color,
+                )?;
+            } else if i == 1 {
+                draw_microphone_icon(display, Point::new(rect.center().x, enter_top + 38), color)?;
+            } else if i == 2 {
+                draw_arrow_icon(
+                    display,
+                    rect.center() + Point::new(0, 2),
+                    crate::touch::SwipeDirection::Right,
+                    color,
+                )?;
+            } else {
+                let text_rect = Rectangle::new(
+                    rect.top_left + Point::new(4, 18),
+                    Size::new(rect.size.width.saturating_sub(8), 40),
+                );
+                TextBox::with_textbox_style(
+                    label,
+                    text_rect,
+                    shifted_text_style(u8g2_fonts::fonts::u8g2_font_wqy12_t_gb2312a, color, 3),
+                    hint_style,
+                )
+                .draw(display)?;
+            }
+        }
 
         let e = crate::lcd::async_flush_display(
             self.display.data(),
@@ -1232,18 +1515,14 @@ impl UI {
     ) -> anyhow::Result<()> {
         let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
         let dirty = {
-            let session = self.terminal.ensure_session();
             if full_frame {
                 self.display.clear(ColorFormat::CSS_BLACK)?;
-                session
-                    .renderer
-                    .render(session.parser.screen(), self.display.as_mut())?;
+                self.render_terminal_full_to_display()?;
+                let session = self.terminal.ensure_session();
                 session.renderer.invalidate();
                 Some(self.display.bounding_box())
             } else {
-                session
-                    .renderer
-                    .render_diff(session.parser.screen(), self.display.as_mut())?
+                self.render_terminal_diff_to_display()?
             }
         };
         let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
@@ -1281,15 +1560,13 @@ impl UI {
         }
         self.terminal.append_render_deadline = None;
 
-        let Some(session) = self.terminal.session.as_mut() else {
+        if self.terminal.session.is_none() {
             return Ok(false);
-        };
+        }
         let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
-        let dirty = session
-            .renderer
-            .render_diff(session.parser.screen(), self.display.as_mut())?;
+        let dirty = self.render_terminal_diff_to_display()?;
         let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
-        let cache_len = session.renderer.cache_len();
+        let cache_len = self.terminal.ensure_session().renderer.cache_len();
 
         let flush_elapsed_us = match dirty {
             Some(rect) => self.flush_terminal_dirty(rect).await?.unwrap_or(0),
@@ -1307,16 +1584,15 @@ impl UI {
     }
 
     pub async fn redraw_cached_terminal_text(&mut self) -> anyhow::Result<bool> {
-        let Some(session) = self.terminal.session.as_mut() else {
+        if self.terminal.session.is_none() {
             return Ok(false);
-        };
+        }
         self.terminal.append_render_deadline = None;
 
         let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
         self.display.clear(ColorFormat::CSS_BLACK)?;
-        session
-            .renderer
-            .render(session.parser.screen(), self.display.as_mut())?;
+        self.render_terminal_full_to_display()?;
+        let session = self.terminal.ensure_session();
         session.renderer.invalidate();
         let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
         let cache_len = session.renderer.cache_len();
@@ -1470,9 +1746,12 @@ impl UI {
 
     // 横向42个字符
     async fn display_flush(&mut self) -> anyhow::Result<()> {
-        let image = tinygif::Gif::<ColorFormat>::from_slice(GIF_IMG).unwrap();
-        for frame in image.frames() {
-            frame.draw(self.display.as_mut())?;
+        if let Some(gif) = self.status_gif.as_ref() {
+            for frame in gif.frames() {
+                frame.draw(self.display.as_mut())?;
+            }
+        } else {
+            self.display.clear(ColorFormat::CSS_BLACK)?;
         }
 
         self.state_background

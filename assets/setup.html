@@ -54,9 +54,9 @@
                             <h3 class="card-title text-lg" id="urlTitle">VibeWatch Server</h3>
                             <label class="form-control">
                                 <div class="label">
-                                    <span class="label-text">WebSocket URL</span>
+                                    <span class="label-text">MQTT Broker URL</span>
                                 </div>
-                                <input type="text" id="serverUrlInput" placeholder="VibeWatch server WebSocket URL"
+                                <input type="text" id="serverUrlInput" placeholder="mqtt://user:pass@host:1883"
                                     class="input input-bordered w-full">
                             </label>
                         </div>
@@ -113,6 +113,27 @@
                         </div>
                     </div>
 
+                    <div class="card bg-base-100 border border-base-300">
+                        <div class="card-body">
+                            <h3 class="card-title text-lg">Watch Background</h3>
+                            <p class="text-xs opacity-70">Upload one GIF file for the status background. Maximum size:
+                                128KB.</p>
+                            <label class="form-control">
+                                <div class="label">
+                                    <span class="label-text">GIF file</span>
+                                </div>
+                                <input type="file" id="backgroundFileInput" accept=".gif,image/gif"
+                                    class="file-input file-input-bordered w-full">
+                                <div class="label">
+                                    <span class="label-text-alt" id="backgroundFileStatus">No file selected</span>
+                                </div>
+                            </label>
+                            <button class="btn btn-outline w-full" id="uploadBackgroundButton" disabled>
+                                Upload Background
+                            </button>
+                        </div>
+                    </div>
+
                 </div>
             </div>
         </div>
@@ -145,8 +166,13 @@
         // 写入为 JSON {"wifi_list":[...], "server_url":"...", "asr_config":{...}},读取返回整份快照。
         const CONFIG_ID = "cef520a9-bcb5-4fc6-87f7-82804eee2b20";
         const AUDIO_ID = "a8ef1f04-b6e8-4d7b-bd40-6f2ebcbb2f49";
+        const BACKGROUND_ID = "3d5a6f16-6e71-4f17-9e61-2f4c1b8f0b23";
         const RESET_ID = "f0e1d2c3-b4a5-6789-0abc-def123456789";
         const MAX_AUDIO_BYTES = 256 * 1024;
+        const WATCH_BACKGROUND_WIDTH = 410;
+        const WATCH_BACKGROUND_HEIGHT = 502;
+        const MAX_BACKGROUND_SOURCE_BYTES = 512 * 1024;
+        const MAX_BACKGROUND_BYTES = 128 * 1024;
 
         // global variables
         let device = null;
@@ -178,6 +204,9 @@
         const audioFileInput = document.getElementById('audioFileInput');
         const audioFileStatus = document.getElementById('audioFileStatus');
         const uploadAudioButton = document.getElementById('uploadAudioButton');
+        const backgroundFileInput = document.getElementById('backgroundFileInput');
+        const backgroundFileStatus = document.getElementById('backgroundFileStatus');
+        const uploadBackgroundButton = document.getElementById('uploadBackgroundButton');
         const notificationToast = document.getElementById('notificationToast');
         const toastMessage = document.getElementById('toastMessage');
         const resetNotSupportedModal = document.getElementById('resetNotSupportedModal');
@@ -408,6 +437,8 @@
             asrModelInput.disabled = false;
             audioFileInput.disabled = false;
             uploadAudioButton.disabled = !audioFileInput.files[0];
+            backgroundFileInput.disabled = false;
+            uploadBackgroundButton.disabled = !backgroundFileInput.files[0];
             controlPanel.classList.remove('opacity-50', 'pointer-events-none');
         }
 
@@ -421,6 +452,8 @@
             asrModelInput.disabled = true;
             audioFileInput.disabled = true;
             uploadAudioButton.disabled = true;
+            backgroundFileInput.disabled = true;
+            uploadBackgroundButton.disabled = true;
             controlPanel.classList.add('opacity-50', 'pointer-events-none');
         }
 
@@ -453,6 +486,11 @@
                 asrUriInput.value = asr.uri || '';
                 asrApiKeyInput.value = asr.api_key || '';
                 asrModelInput.value = asr.model || '';
+                if (snap.background_gif_size) {
+                    backgroundFileStatus.textContent = `Device has custom GIF (${Math.round(snap.background_gif_size / 1024)}KB)`;
+                } else if (!backgroundFileInput.files[0]) {
+                    backgroundFileStatus.textContent = 'No custom background on device';
+                }
 
                 // Clear all modification marks
                 clearWifiModification();
@@ -649,6 +687,148 @@
             }
         }
 
+        function validateBackgroundFile(file) {
+            if (!file) {
+                throw new Error('Please select a GIF file');
+            }
+            if (file.size === 0) {
+                throw new Error('The GIF file is empty');
+            }
+            if (file.size > MAX_BACKGROUND_SOURCE_BYTES) {
+                throw new Error('The source GIF file size cannot exceed 512KB');
+            }
+            if (!file.name.toLowerCase().endsWith('.gif')) {
+                throw new Error('Please select a .gif file');
+            }
+        }
+
+        async function prepareBackgroundGif(file) {
+            validateBackgroundFile(file);
+            const source = await file.arrayBuffer();
+            const data = new Uint8Array(source);
+            const header = String.fromCharCode(...data.slice(0, 6));
+            if (header !== 'GIF87a' && header !== 'GIF89a') {
+                throw new Error('Invalid GIF file header');
+            }
+            const frames = await decodeGifFrames(source);
+            const scaled = await encodeScaledGif(frames);
+            if (scaled.byteLength > MAX_BACKGROUND_BYTES) {
+                throw new Error(`Scaled GIF is ${Math.round(scaled.byteLength / 1024)}KB; maximum is 128KB`);
+            }
+            return scaled;
+        }
+
+        async function decodeGifFrames(source) {
+            if (!('ImageDecoder' in window)) {
+                throw new Error('This browser cannot decode animated GIF frames. Please use Chrome or Edge.');
+            }
+            const decoder = new ImageDecoder({
+                data: source.slice(0),
+                type: 'image/gif'
+            });
+            await decoder.tracks.ready;
+            const frameCount = decoder.tracks.selectedTrack.frameCount || 1;
+            const frames = [];
+            for (let i = 0; i < frameCount; i++) {
+                const result = await decoder.decode({ frameIndex: i });
+                const image = result.image;
+                frames.push({
+                    image,
+                    width: image.displayWidth,
+                    height: image.displayHeight,
+                    delay: Math.max(20, Math.round((image.duration || 100000) / 1000)),
+                    close: () => image.close()
+                });
+                if (frames.length >= 60) break;
+            }
+            return frames;
+        }
+
+        async function encodeScaledGif(frames) {
+            if (!frames.length) {
+                throw new Error('GIF contains no frames');
+            }
+            const { GIFEncoder, quantize, applyPalette } = await import('https://esm.sh/gifenc@1.0.3');
+            const gif = GIFEncoder();
+            const canvas = document.createElement('canvas');
+            canvas.width = WATCH_BACKGROUND_WIDTH;
+            canvas.height = WATCH_BACKGROUND_HEIGHT;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+            try {
+                for (const frame of frames) {
+                    ctx.fillStyle = '#000000';
+                    ctx.fillRect(0, 0, WATCH_BACKGROUND_WIDTH, WATCH_BACKGROUND_HEIGHT);
+                    drawCover(ctx, frame.image, frame.width, frame.height);
+
+                    const pixels = ctx.getImageData(0, 0, WATCH_BACKGROUND_WIDTH, WATCH_BACKGROUND_HEIGHT).data;
+                    const palette = quantize(pixels, 256);
+                    const index = applyPalette(pixels, palette);
+                    gif.writeFrame(index, WATCH_BACKGROUND_WIDTH, WATCH_BACKGROUND_HEIGHT, {
+                        palette,
+                        delay: frame.delay
+                    });
+                }
+            } finally {
+                frames.forEach(frame => frame.close());
+            }
+
+            gif.finish();
+            return gif.bytes();
+        }
+
+        function drawCover(ctx, image, sourceWidth, sourceHeight) {
+            const scale = Math.max(
+                WATCH_BACKGROUND_WIDTH / sourceWidth,
+                WATCH_BACKGROUND_HEIGHT / sourceHeight
+            );
+            const drawWidth = sourceWidth * scale;
+            const drawHeight = sourceHeight * scale;
+            const dx = (WATCH_BACKGROUND_WIDTH - drawWidth) / 2;
+            const dy = (WATCH_BACKGROUND_HEIGHT - drawHeight) / 2;
+            ctx.drawImage(image, dx, dy, drawWidth, drawHeight);
+        }
+
+        async function uploadBackgroundFile() {
+            if (!isConnected || !service) {
+                showNotification('Error', 'VibeWatch is not connected', true);
+                return;
+            }
+
+            const file = backgroundFileInput.files[0];
+            try {
+                uploadBackgroundButton.disabled = true;
+                uploadBackgroundButton.textContent = 'Scaling...';
+                const data = await prepareBackgroundGif(file);
+                uploadBackgroundButton.textContent = 'Uploading... 0%';
+
+                const characteristic = await service.getCharacteristic(BACKGROUND_ID);
+                const lengthPacket = new Uint8Array(4);
+                new DataView(lengthPacket.buffer).setUint32(0, data.byteLength, true);
+                await characteristic.writeValue(lengthPacket);
+
+                const chunkSize = 512;
+                const totalChunks = Math.ceil(data.byteLength / chunkSize);
+                for (let i = 0; i < totalChunks; i++) {
+                    const start = i * chunkSize;
+                    const end = Math.min(start + chunkSize, data.byteLength);
+                    await characteristic.writeValue(data.slice(start, end));
+                    const progress = Math.round(((i + 1) / totalChunks) * 100);
+                    uploadBackgroundButton.textContent = `Uploading... ${progress}%`;
+                    await new Promise(resolve => setTimeout(resolve, 20));
+                }
+
+                backgroundFileStatus.textContent = `${file.name} scaled and uploaded (${Math.round(data.byteLength / 1024)}KB GIF)`;
+                showNotification('Success', 'Background uploaded. Restart device to apply it.');
+            } catch (error) {
+                console.error('Background upload failed:', error);
+                showNotification('Error', 'Background upload failed: ' + error.message, true);
+            } finally {
+                uploadBackgroundButton.disabled = !isConnected || !backgroundFileInput.files[0];
+                uploadBackgroundButton.textContent = 'Upload Background';
+            }
+        }
+
         connectButton.addEventListener('click', async () => {
             if (!isConnected) {
                 await connectToDevice();
@@ -701,6 +881,28 @@
 
         uploadAudioButton.addEventListener('click', () => {
             uploadAudioFile();
+        });
+
+        backgroundFileInput.addEventListener('change', () => {
+            const file = backgroundFileInput.files[0];
+            uploadBackgroundButton.disabled = true;
+            if (!file) {
+                backgroundFileStatus.textContent = 'No file selected';
+                return;
+            }
+            try {
+                validateBackgroundFile(file);
+                backgroundFileStatus.textContent = `${file.name} (${Math.round(file.size / 1024)}KB GIF)`;
+                uploadBackgroundButton.disabled = !isConnected;
+            } catch (error) {
+                backgroundFileInput.value = '';
+                backgroundFileStatus.textContent = error.message;
+                showNotification('Error', error.message, true);
+            }
+        });
+
+        uploadBackgroundButton.addEventListener('click', () => {
+            uploadBackgroundFile();
         });
 
         if (!navigator.bluetooth) {

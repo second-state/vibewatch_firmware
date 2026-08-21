@@ -222,7 +222,6 @@ pub async fn run(
                         session_item_rects: &render_state.session_item_rects,
                     },
                 );
-                let should_render = result.render;
                 let render_after_effect = handle_app_event_result_(
                     result,
                     &mut state,
@@ -241,8 +240,9 @@ pub async fn run(
                 if render_after_effect {
                     render_requested = true;
                 }
-                if should_render {
+                if state.route == app::Route::SessionPicker {
                     last_session_list_change = tokio::time::Instant::now();
+                    session_list_off_since = None;
                 }
             }
             // MQTT 事件更新 AppState，screen frame 也从这里进入渲染。
@@ -265,6 +265,8 @@ pub async fn run(
                 if let Some(sync) = session_sync.as_ref() {
                     render_requested |= sync.render;
                 }
+                let was_session_picker = state.route == app::Route::SessionPicker;
+                let was_backlight_off = backlight == BacklightMode::Off;
                 let result = state.handle_event(
                     app::AppEvent::Mqtt(ev),
                     &app::AppEventContext {
@@ -303,6 +305,13 @@ pub async fn run(
                 }
                 if should_render {
                     render_requested = true;
+                }
+                if state.route == app::Route::SessionPicker
+                    && (!was_session_picker
+                        || (was_backlight_off && backlight != BacklightMode::Off))
+                {
+                    last_session_list_change = tokio::time::Instant::now();
+                    session_list_off_since = None;
                 }
             }
         }
@@ -915,53 +924,48 @@ async fn run_touch_asr(
             gesture = touch.next_gesture() => {
                 match gesture {
                     Some(touch::TouchGesture::Press { point }) => {
-                        if is_asr_touch(point) {
-                            hint = match record_asr_once(
+                        if is_asr_record_touch(point) {
+                            hint = record_asr_into_editor(
                                 server,
                                 gui,
                                 touch,
                                 asr_tx,
-                                asr_config.cloned(),
-                                &editor.display_text(),
+                                asr_config,
+                                &mut editor,
                             )
-                            .await
-                            {
-                                Ok(Some(text)) => {
-                                    let text = text.trim();
-                                    log::info!("Local ASR result: {text}");
-                                    editor.insert_str(&format!("{text} "));
-                                    "Hold Record"
-                                }
-                                Ok(None) => "(empty)",
-                                Err(e) => {
-                                    log::error!("ASR failed: {e:?}");
-                                    "ASR error"
-                                }
-                            };
+                            .await;
+                        } else if let Some(action) = bottom_asr_action(point) {
+                            apply_bottom_asr_action(action, &mut editor);
                             let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
-                        } else if let Some(action) = top_asr_action(point) {
-                            apply_top_asr_action(action, &mut editor);
+                            wait_bottom_asr_action(server, gui, touch, action, &mut editor, hint).await?;
+                        } else if top_asr_action(point) == Some(TopAsrAction::Delete) {
+                            editor.backspace();
                             let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
-                            wait_top_asr_action(server, gui, touch, action, &mut editor, hint).await?;
+                            wait_top_delete_action(server, gui, touch, &mut editor, hint).await?;
+                        }
+                    }
+                    Some(touch::TouchGesture::Click { start, end }) => {
+                        let press_action = top_asr_action(start);
+                        let release_action = top_asr_action(end);
+                        if press_action.is_some() && press_action == release_action {
+                            match press_action.unwrap() {
+                                TopAsrAction::Submit => {
+                                    submit_asr_editor(server, gui, editor).await?;
+                                    return Ok(());
+                                }
+                                TopAsrAction::Cancel => {
+                                    log::info!("ASR editor canceled by button");
+                                    redraw_active_cached_screen(server, gui).await?;
+                                    return Ok(());
+                                }
+                                TopAsrAction::Delete => {}
+                            }
                         }
                     }
                     Some(touch::TouchGesture::Swipe { start, end, .. }) => {
                         match asr_editor_swipe(start, end) {
                             Some(AsrEditorSwipe::Send) => {
-                                let text = editor.take_trimmed();
-                                if !text.is_empty() {
-                                    if let Err(e) =
-                                        server.send(protocol::ClientMessage::Input(text)).await
-                                    {
-                                        log::warn!(
-                                            "Ignoring ASR editor send after active session disappeared: {e:?}"
-                                        );
-                                        return Ok(());
-                                    }
-                                    redraw_active_cached_screen(server, gui).await?;
-                                    return Ok(());
-                                }
-                                redraw_active_cached_screen(server, gui).await?;
+                                submit_asr_editor(server, gui, editor).await?;
                                 return Ok(());
                             }
                             Some(AsrEditorSwipe::Cancel) => {
@@ -983,6 +987,40 @@ async fn run_touch_asr(
             }
         }
     }
+}
+
+async fn record_asr_into_editor(
+    server: &mut MqttServer,
+    gui: &mut UI,
+    touch: &mut touch::TouchInput,
+    asr_tx: &std::sync::mpsc::Sender<audio::AsrRequest>,
+    asr_config: Option<&audio::AsrConfig>,
+    editor: &mut TouchAsrEditor,
+) -> &'static str {
+    let hint = match record_asr_once(
+        server,
+        gui,
+        touch,
+        asr_tx,
+        asr_config.cloned(),
+        &editor.display_text(),
+    )
+    .await
+    {
+        Ok(Some(text)) => {
+            let text = text.trim();
+            log::info!("Local ASR result: {text}");
+            editor.insert_str(&format!("{text} "));
+            "Hold Record"
+        }
+        Ok(None) => "(empty)",
+        Err(e) => {
+            log::error!("ASR failed: {e:?}");
+            "ASR error"
+        }
+    };
+    let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
+    hint
 }
 
 async fn record_asr_once(
@@ -1031,9 +1069,9 @@ async fn record_asr_once(
             }
             gesture = touch.next_gesture() => {
                 match gesture {
-                    Some(touch::TouchGesture::Press { point }) if is_asr_touch(point) => {}
+                    Some(touch::TouchGesture::Press { point }) if is_asr_record_touch(point) => {}
                     Some(touch::TouchGesture::LongPress { start, end, .. })
-                        if is_asr_touch(start) && is_asr_touch(end) => {}
+                        if is_asr_record_touch(start) && is_asr_record_touch(end) => {}
                     Some(_) | None => cancel.store(true, Ordering::Relaxed),
                 }
             }
@@ -1052,10 +1090,32 @@ async fn record_asr_once(
     }
 }
 
+async fn submit_asr_editor(
+    server: &mut MqttServer,
+    gui: &mut UI,
+    editor: TouchAsrEditor,
+) -> anyhow::Result<()> {
+    let text = editor.take_trimmed();
+    if !text.is_empty() {
+        if let Err(e) = server.send(protocol::ClientMessage::Input(text)).await {
+            log::warn!("Ignoring ASR editor send after active session disappeared: {e:?}");
+            return Ok(());
+        }
+    }
+    redraw_active_cached_screen(server, gui).await
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TopAsrAction {
-    Left,
+    Cancel,
+    Submit,
     Delete,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BottomAsrAction {
+    Left,
+    Record,
     Right,
 }
 
@@ -1137,11 +1197,10 @@ impl TouchAsrEditor {
     }
 }
 
-async fn wait_top_asr_action(
+async fn wait_top_delete_action(
     server: &mut MqttServer,
     gui: &mut UI,
     touch: &mut touch::TouchInput,
-    action: TopAsrAction,
     editor: &mut TouchAsrEditor,
     hint: &str,
 ) -> anyhow::Result<()> {
@@ -1150,9 +1209,10 @@ async fn wait_top_asr_action(
             gesture = touch.next_gesture() => {
                 match gesture {
                     Some(touch::TouchGesture::LongPress { start, end, .. })
-                        if top_asr_action(start) == Some(action) && top_asr_action(end) == Some(action) =>
+                        if top_asr_action(start) == Some(TopAsrAction::Delete)
+                            && top_asr_action(end) == Some(TopAsrAction::Delete) =>
                     {
-                        apply_top_asr_action(action, editor);
+                        editor.backspace();
                         let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
                     }
                     Some(touch::TouchGesture::Press { .. }) => {}
@@ -1161,18 +1221,49 @@ async fn wait_top_asr_action(
             }
             ev = server.recv() => {
                 if ev.is_none() {
-                    return Err(anyhow::anyhow!("MQTT event source closed during ASR top action"));
+                    return Err(anyhow::anyhow!("MQTT event source closed during ASR delete action"));
                 }
             }
         }
     }
 }
 
-fn apply_top_asr_action(action: TopAsrAction, editor: &mut TouchAsrEditor) {
+async fn wait_bottom_asr_action(
+    server: &mut MqttServer,
+    gui: &mut UI,
+    touch: &mut touch::TouchInput,
+    action: BottomAsrAction,
+    editor: &mut TouchAsrEditor,
+    hint: &str,
+) -> anyhow::Result<()> {
+    loop {
+        tokio::select! {
+            gesture = touch.next_gesture() => {
+                match gesture {
+                    Some(touch::TouchGesture::LongPress { start, end, .. })
+                        if bottom_asr_action(start) == Some(action) && bottom_asr_action(end) == Some(action) =>
+                    {
+                        apply_bottom_asr_action(action, editor);
+                        let _ = gui.show_asr_editor(&editor.display_text(), hint).await;
+                    }
+                    Some(touch::TouchGesture::Press { .. }) => {}
+                    Some(_) | None => return Ok(()),
+                }
+            }
+            ev = server.recv() => {
+                if ev.is_none() {
+                    return Err(anyhow::anyhow!("MQTT event source closed during ASR bottom action"));
+                }
+            }
+        }
+    }
+}
+
+fn apply_bottom_asr_action(action: BottomAsrAction, editor: &mut TouchAsrEditor) {
     match action {
-        TopAsrAction::Left => editor.move_left(),
-        TopAsrAction::Delete => editor.backspace(),
-        TopAsrAction::Right => editor.move_right(),
+        BottomAsrAction::Left => editor.move_left(),
+        BottomAsrAction::Record => {}
+        BottomAsrAction::Right => editor.move_right(),
     }
 }
 
@@ -1182,33 +1273,61 @@ fn top_asr_action(touch: lcd::TouchPoint) -> Option<TopAsrAction> {
     }
     let third = lcd::LCD_WIDTH / 3;
     if touch.x < third {
-        Some(TopAsrAction::Left)
-    } else if touch.x < third * 2 {
         Some(TopAsrAction::Delete)
+    } else if touch.x < third * 2 {
+        Some(TopAsrAction::Submit)
     } else {
-        Some(TopAsrAction::Right)
+        Some(TopAsrAction::Cancel)
+    }
+}
+
+fn bottom_asr_action(touch: lcd::TouchPoint) -> Option<BottomAsrAction> {
+    if touch.y <= lcd::LCD_HEIGHT.saturating_sub(80) {
+        return None;
+    }
+    let third = lcd::LCD_WIDTH / 3;
+    if touch.x < third {
+        Some(BottomAsrAction::Left)
+    } else if touch.x < third * 2 {
+        Some(BottomAsrAction::Record)
+    } else {
+        Some(BottomAsrAction::Right)
     }
 }
 
 fn asr_editor_swipe(start: lcd::TouchPoint, end: lcd::TouchPoint) -> Option<AsrEditorSwipe> {
-    if is_asr_touch(start) || top_asr_action(start).is_some() {
+    if is_asr_record_touch(start)
+        || bottom_asr_action(start).is_some()
+        || top_asr_action(start).is_some()
+    {
         return None;
     }
 
-    let dx = (end.x as i32 - start.x as i32).abs();
+    let dx = end.x as i32 - start.x as i32;
     let dy = end.y as i32 - start.y as i32;
-    if dx > TOUCH_SWIPE_THRESHOLD_PX || dy.abs() < TOUCH_SWIPE_THRESHOLD_PX {
-        return None;
+    if dx >= TOUCH_SWIPE_THRESHOLD_PX && dy.abs() <= TOUCH_SWIPE_THRESHOLD_PX {
+        return Some(AsrEditorSwipe::Cancel);
     }
-    if dy < 0 {
+
+    if dx.abs() <= TOUCH_SWIPE_THRESHOLD_PX && dy <= -TOUCH_SWIPE_THRESHOLD_PX {
         Some(AsrEditorSwipe::Send)
     } else {
-        Some(AsrEditorSwipe::Cancel)
+        None
     }
 }
 
-fn is_asr_touch(touch: lcd::TouchPoint) -> bool {
-    touch.y > lcd::LCD_HEIGHT.saturating_sub(80)
+fn is_asr_record_touch(touch: lcd::TouchPoint) -> bool {
+    bottom_asr_action(touch) == Some(BottomAsrAction::Record) || is_asr_text_touch(touch)
+}
+
+fn is_asr_text_touch(touch: lcd::TouchPoint) -> bool {
+    const TOP_H: u16 = 80;
+    const BORDER_OUTSET: u16 = 2;
+    let enter_top = lcd::LCD_HEIGHT.saturating_sub(80);
+    touch.x >= 12 - BORDER_OUTSET
+        && touch.x < lcd::LCD_WIDTH.saturating_sub(12 - BORDER_OUTSET)
+        && touch.y >= TOP_H.saturating_sub(BORDER_OUTSET)
+        && touch.y < enter_top.saturating_sub(8).saturating_add(BORDER_OUTSET)
 }
 
 async fn show_idle_shutdown_prompt(
