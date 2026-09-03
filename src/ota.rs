@@ -203,50 +203,91 @@ fn ota_write_upload(
 fn ota_download_latest() -> anyhow::Result<()> {
     log::info!("OTA download latest from {}", OTA_DOWNLOAD_URL);
 
-    let config = esp_idf_svc::http::client::Configuration {
-        buffer_size: Some(16 * 1024),
-        buffer_size_tx: Some(1024),
-        crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
-        timeout: Some(std::time::Duration::from_secs(60)),
-        ..Default::default()
-    };
-    let conn = esp_idf_svc::http::client::EspHttpConnection::new(&config)?;
-    let mut client = embedded_svc::http::client::Client::wrap(conn);
-    let request = client.get(OTA_DOWNLOAD_URL)?;
-    let mut response = request.submit()?;
-    let status = response.status();
-    log::info!("OTA download HTTP status: {}", status);
-    if status != 200 {
-        anyhow::bail!("OTA download failed: HTTP {}", status);
-    }
-
-    let content_len = response
-        .header("content-length")
-        .and_then(|value| value.parse::<usize>().ok());
+    const MAX_ATTEMPTS: usize = 10;
 
     let mut ota = EspOta::new()?;
     ota.mark_running_slot_valid()?;
-    let mut update = match content_len {
-        Some(len) => {
-            log::info!("OTA download content-length: {} bytes", len);
-            ota.initiate_update_with_known_size(len)?
-        }
-        None => {
-            log::warn!("OTA download missing content-length; erasing full OTA partition");
-            ota.initiate_update()?
-        }
-    };
+    let mut update = ota.initiate_update()?;
 
+    let mut total: usize = 0;
+    let mut full_len: Option<usize> = None;
     let mut buf = vec![0u8; 8192];
-    let mut total = 0usize;
-    loop {
-        let n = response.read(&mut buf)?;
-        if n == 0 {
+    let mut completed = false;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let range_from = if total == 0 { None } else { Some(total) };
+        if attempt > 1 {
+            log::warn!(
+                "OTA download retry #{attempt}, resuming at {} bytes via Range",
+                total
+            );
+        }
+
+        let config = esp_idf_svc::http::client::Configuration {
+            buffer_size: Some(16 * 1024),
+            buffer_size_tx: Some(1024),
+            crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
+            timeout: Some(std::time::Duration::from_secs(60)),
+            ..Default::default()
+        };
+        let conn = esp_idf_svc::http::client::EspHttpConnection::new(&config)?;
+        let mut client = embedded_svc::http::client::Client::wrap(conn);
+
+        let range = format!("bytes={total}-");
+        let headers = [("Range", range.as_str())];
+        let mut response = match range_from {
+            Some(_) => {
+                let request = client.request(Method::Get, OTA_DOWNLOAD_URL, &headers)?;
+                request.submit()?
+            }
+            None => client.get(OTA_DOWNLOAD_URL)?.submit()?,
+        };
+        let status = response.status();
+        log::info!("OTA download HTTP status: {}", status);
+
+        if status != 200 && !(status == 206 && range_from.is_some()) {
+            anyhow::bail!("OTA download failed: HTTP {}", status);
+        }
+        if status == 200 {
+            full_len = response
+                .header("content-length")
+                .and_then(|value| value.parse::<usize>().ok());
+            if let Some(len) = full_len {
+                log::info!("OTA download content-length: {} bytes", len);
+            } else {
+                log::warn!("OTA download missing content-length; will rely on EOF");
+            }
+        }
+
+        let mut round_eof = true;
+        loop {
+            match response.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    update.write(&buf[..n])?;
+                    total += n;
+                    log::info!("OTA download chunk: {} bytes, total {}", n, total);
+                }
+                Err(e) => {
+                    log::warn!("OTA download connection lost at {total} bytes: {e:?}");
+                    round_eof = false;
+                    break;
+                }
+            }
+        }
+
+        if round_eof && full_len.map_or(true, |len| total >= len) {
+            completed = true;
             break;
         }
-        update.write(&buf[..n])?;
-        total += n;
-        log::info!("OTA download chunk: {} bytes, total {}", n, total);
+
+        drop(response);
+        drop(client);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    if !completed {
+        anyhow::bail!("OTA download incomplete after {MAX_ATTEMPTS} attempts: got {total} bytes");
     }
 
     update.complete()?;
