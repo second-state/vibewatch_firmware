@@ -17,6 +17,7 @@ mod setting;
 mod touch;
 mod ui;
 mod util;
+mod watch_ui;
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();

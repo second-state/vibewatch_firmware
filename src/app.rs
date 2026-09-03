@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 
-use embedded_graphics::primitives::Rectangle;
-
 use crate::{mqtt::MqttEvent, protocol, touch::TouchGesture, ui::UI};
 
 const SESSION_PICKER_BOOT_LONG_PRESS_COUNT: u8 = 5;
@@ -139,7 +137,8 @@ pub enum AppEvent {
 }
 
 pub struct AppEventContext<'a> {
-    pub session_item_rects: &'a [Rectangle],
+    pub session_list_hits: &'a crate::watch_ui::SessionListHitRegions,
+    pub active_session_hits: &'a crate::watch_ui::ActiveSessionHitRegions,
 }
 
 pub struct AppEventResult {
@@ -178,7 +177,8 @@ impl AppEventResult {
 }
 
 pub struct AppRenderState {
-    pub session_item_rects: Vec<Rectangle>,
+    pub session_list_hits: crate::watch_ui::SessionListHitRegions,
+    pub active_session_hits: crate::watch_ui::ActiveSessionHitRegions,
     pub next_title_refresh: tokio::time::Instant,
     pub next_mqtt_reconnect_refresh: tokio::time::Instant,
 }
@@ -192,7 +192,8 @@ pub struct SessionSyncResult {
 impl AppRenderState {
     pub fn new() -> Self {
         Self {
-            session_item_rects: Vec::new(),
+            session_list_hits: crate::watch_ui::SessionListHitRegions::default(),
+            active_session_hits: crate::watch_ui::ActiveSessionHitRegions::default(),
             next_title_refresh: tokio::time::Instant::now() + crate::ui::MENU_TITLE_REFRESH_DELAY,
             next_mqtt_reconnect_refresh: tokio::time::Instant::now()
                 + std::time::Duration::from_secs(1),
@@ -373,7 +374,7 @@ impl AppState {
     ) -> AppEventResult {
         match self.route {
             Route::SessionPicker => self.handle_session_picker_touch(gesture, context),
-            Route::ActiveSession => self.handle_active_session_touch(gesture),
+            Route::ActiveSession => self.handle_active_session_touch(gesture, context),
             Route::MainMenu
             | Route::Settings
             | Route::BootMenu
@@ -394,8 +395,12 @@ impl AppState {
             }
             TouchGesture::Click { start, end } => {
                 self.sessions.boot_long_press_count = 0;
-                let press_index = crate::ui::list_touch_index(start, context.session_item_rects);
-                let release_index = crate::ui::list_touch_index(end, context.session_item_rects);
+                if context.session_list_hits.back_hit_pair(start, end) {
+                    self.route = Route::MainMenu;
+                    return AppEventResult::none();
+                }
+                let press_index = context.session_list_hits.hit_index(start);
+                let release_index = context.session_list_hits.hit_index(end);
                 if press_index.is_none() || press_index != release_index {
                     return AppEventResult::none();
                 }
@@ -449,7 +454,7 @@ impl AppState {
                         let Some(delta) = list_scroll_delta(start, end) else {
                             return AppEventResult::none();
                         };
-                        let visible_count = context.session_item_rects.len().max(1);
+                        let visible_count = context.session_list_hits.visible_count().max(1);
                         let next_offset = apply_scroll_delta(
                             self.sessions.scroll_offset,
                             self.sessions.items.len(),
@@ -474,86 +479,74 @@ impl AppState {
         }
     }
 
-    fn handle_active_session_touch(&mut self, gesture: TouchGesture) -> AppEventResult {
+    fn handle_active_session_touch(
+        &mut self,
+        gesture: TouchGesture,
+        context: &AppEventContext<'_>,
+    ) -> AppEventResult {
         match gesture {
-            TouchGesture::Press { point } => {
-                if is_screen_backspace_point(point) {
-                    log::info!("new UI backspace press");
-                    self.active_session.backspace_overlay = true;
-                    self.active_session.menu_overlay = false;
-                    self.active_session.backspace_hold_sent = false;
-                    self.active_session.last_backspace_sent_at = None;
-                    AppEventResult::render()
-                } else if is_screen_menu_point(point) {
-                    log::info!("new UI screen menu press");
+            TouchGesture::Press { point } => match context.active_session_hits.hit(point) {
+                Some(crate::watch_ui::ActiveSessionHit::Close) => {
+                    log::info!("new UI screen close/menu press");
                     self.active_session.menu_overlay = true;
                     self.active_session.backspace_overlay = false;
                     AppEventResult::render()
-                } else {
-                    AppEventResult::none()
                 }
-            }
+                _ => AppEventResult::none(),
+            },
             TouchGesture::Click { start, end } => {
                 let had_overlay =
                     self.active_session.backspace_overlay || self.active_session.menu_overlay;
-                if is_screen_backspace_point(start) && is_screen_backspace_point(end) {
-                    log::info!("new UI backspace click");
-                    self.active_session.backspace_overlay = false;
-                    self.active_session.menu_overlay = false;
-                    self.active_session.clear_overlay = had_overlay;
-                    let send_click = !self.active_session.backspace_hold_sent;
-                    self.active_session.backspace_hold_sent = false;
-                    self.active_session.last_backspace_sent_at = None;
-                    if send_click {
-                        AppEventResult::render_with_effect(Effect::MqttPublish(
-                            MqttCommand::SendKey {
-                                key: "\x7f".to_string(),
-                            },
-                        ))
-                    } else {
-                        AppEventResult::render()
+                match context.active_session_hits.hit_pair(start, end) {
+                    Some(crate::watch_ui::ActiveSessionHit::Back) => {
+                        log::info!("new UI active session back click");
+                        self.route = Route::SessionPicker;
+                        self.active_session.backspace_overlay = false;
+                        self.active_session.menu_overlay = false;
+                        self.active_session.loading = false;
+                        AppEventResult {
+                            render: true,
+                            effects: vec![
+                                Effect::MqttPublish(MqttCommand::SendSync { close: true }),
+                                Effect::ClearActiveSession,
+                            ],
+                        }
                     }
-                } else if is_screen_menu_point(start) && is_screen_menu_point(end) {
-                    log::info!("new UI screen menu click");
-                    self.active_session.menu_overlay = false;
-                    self.active_session.backspace_overlay = false;
-                    self.active_session.clear_overlay = had_overlay;
-                    AppEventResult::render_with_effect(Effect::OpenScreenMenu)
-                } else if is_asr_touch(start) && is_asr_touch(end) {
-                    self.active_session.backspace_overlay = false;
-                    self.active_session.menu_overlay = false;
-                    self.active_session.clear_overlay = had_overlay;
-                    AppEventResult::effect(Effect::OpenAsrEditor)
-                } else {
-                    self.active_session.backspace_overlay = false;
-                    self.active_session.menu_overlay = false;
-                    self.active_session.clear_overlay = had_overlay;
-                    if had_overlay {
-                        AppEventResult::render()
-                    } else {
-                        AppEventResult::none()
+                    Some(crate::watch_ui::ActiveSessionHit::Close) => {
+                        log::info!("new UI screen close/menu click");
+                        self.active_session.menu_overlay = false;
+                        self.active_session.backspace_overlay = false;
+                        self.active_session.clear_overlay = had_overlay;
+                        AppEventResult::render_with_effect(Effect::OpenScreenMenu)
+                    }
+                    Some(crate::watch_ui::ActiveSessionHit::RunAction) => {
+                        log::info!("new UI agent run action click");
+                        self.active_session.backspace_overlay = false;
+                        self.active_session.menu_overlay = false;
+                        self.active_session.clear_overlay = had_overlay;
+                        AppEventResult::effect(Effect::OpenAsrEditor)
+                    }
+                    Some(
+                        crate::watch_ui::ActiveSessionHit::PrevAction
+                        | crate::watch_ui::ActiveSessionHit::NextAction,
+                    ) => AppEventResult::none(),
+                    None => {
+                        self.active_session.backspace_overlay = false;
+                        self.active_session.menu_overlay = false;
+                        self.active_session.clear_overlay = had_overlay;
+                        if had_overlay {
+                            AppEventResult::render()
+                        } else {
+                            AppEventResult::none()
+                        }
                     }
                 }
             }
             TouchGesture::LongPress { start, end, .. } => {
-                if is_screen_backspace_point(start) && is_screen_backspace_point(end) {
-                    const BACKSPACE_REPEAT_DELAY: std::time::Duration =
-                        std::time::Duration::from_millis(500);
-                    let now = tokio::time::Instant::now();
-                    if self
-                        .active_session
-                        .last_backspace_sent_at
-                        .is_some_and(|sent_at| now.duration_since(sent_at) < BACKSPACE_REPEAT_DELAY)
-                    {
-                        return AppEventResult::none();
-                    }
-                    log::info!("new UI backspace long press");
-                    self.active_session.backspace_overlay = true;
-                    self.active_session.backspace_hold_sent = true;
-                    self.active_session.last_backspace_sent_at = Some(now);
-                    AppEventResult::effect(Effect::MqttPublish(MqttCommand::SendKey {
-                        key: "\x7f".to_string(),
-                    }))
+                if context.active_session_hits.hit_pair(start, end)
+                    == Some(crate::watch_ui::ActiveSessionHit::RunAction)
+                {
+                    AppEventResult::effect(Effect::OpenAsrEditor)
                 } else {
                     AppEventResult::none()
                 }
@@ -573,15 +566,9 @@ impl AppState {
                 self.active_session.backspace_hold_sent = false;
                 self.active_session.last_backspace_sent_at = None;
 
-                let next_offset = if matches!(
-                    direction,
-                    Some(crate::touch::SwipeDirection::Up | crate::touch::SwipeDirection::Down)
-                ) && scroll_swipe_message(start, current).is_some()
-                {
-                    dy
-                } else {
-                    0
-                };
+                let next_offset = context
+                    .active_session_hits
+                    .swipe_preview_offset(start, current, direction, dy);
                 if next_offset == self.active_session.scroll_preview_y_offset && !had_overlay {
                     return AppEventResult::none();
                 }
@@ -617,28 +604,41 @@ impl AppState {
                 self.active_session.clear_overlay = had_overlay;
                 self.active_session.backspace_hold_sent = false;
                 self.active_session.last_backspace_sent_at = None;
-                if is_back_swipe(start, end) {
-                    log::info!("new UI right swipe detected, returning to session list");
-                    self.route = Route::SessionPicker;
-                    self.active_session.loading = false;
-                    AppEventResult {
-                        render: true,
-                        effects: vec![
-                            Effect::MqttPublish(MqttCommand::SendSync { close: true }),
-                            Effect::ClearActiveSession,
-                        ],
+                match context.active_session_hits.swipe(start, end) {
+                    Some(crate::watch_ui::ActiveSessionSwipe::Back) => {
+                        log::info!("new UI right swipe detected, returning to session list");
+                        self.route = Route::SessionPicker;
+                        self.active_session.loading = false;
+                        AppEventResult {
+                            render: true,
+                            effects: vec![
+                                Effect::MqttPublish(MqttCommand::SendSync { close: true }),
+                                Effect::ClearActiveSession,
+                            ],
+                        }
                     }
-                } else if let Some(msg) = scroll_swipe_message(start, end) {
-                    if had_overlay || had_preview {
-                        AppEventResult::render_with_effect(Effect::MqttPublish(msg))
-                    } else {
-                        AppEventResult::effect(Effect::MqttPublish(msg))
+                    Some(crate::watch_ui::ActiveSessionSwipe::ScrollUp) => {
+                        let msg = MqttCommand::SendScrollUp { rows: 15 };
+                        if had_overlay || had_preview {
+                            AppEventResult::render_with_effect(Effect::MqttPublish(msg))
+                        } else {
+                            AppEventResult::effect(Effect::MqttPublish(msg))
+                        }
                     }
-                } else {
-                    if had_overlay {
-                        AppEventResult::render()
-                    } else {
-                        AppEventResult::none()
+                    Some(crate::watch_ui::ActiveSessionSwipe::ScrollDown) => {
+                        let msg = MqttCommand::SendScrollDown { rows: 15 };
+                        if had_overlay || had_preview {
+                            AppEventResult::render_with_effect(Effect::MqttPublish(msg))
+                        } else {
+                            AppEventResult::effect(Effect::MqttPublish(msg))
+                        }
+                    }
+                    None => {
+                        if had_overlay {
+                            AppEventResult::render()
+                        } else {
+                            AppEventResult::none()
+                        }
                     }
                 }
             }
@@ -756,31 +756,26 @@ impl AppState {
         if self.sessions.reconnecting {
             let dots = ".".repeat(self.sessions.reconnect_dots + 1);
             gui.show_status(format!("Reconnect MQTT{dots}"), "").await?;
-            render_state.session_item_rects.clear();
+            render_state.session_list_hits.clear();
             return Ok(());
         }
         if self.sessions.items.is_empty() {
             gui.show_status("no session", "").await?;
-            render_state.session_item_rects.clear();
+            render_state.session_list_hits.clear();
             return Ok(());
         }
 
-        let visible_hint = render_state.session_item_rects.len().max(1);
+        let visible_hint = render_state.session_list_hits.visible_count().max(1);
         self.sessions.scroll_offset = clamp_scroll_offset(
             self.sessions.scroll_offset,
             self.sessions.items.len(),
             visible_hint,
         );
 
-        let items: Vec<(String, bool)> = self
-            .sessions
-            .items
-            .iter()
-            .skip(self.sessions.scroll_offset)
-            .map(|item| (item.label.clone(), item.working))
-            .collect();
-        render_state.session_item_rects =
-            gui.display_menu_list(&self.sessions.title, &items).await?;
+        let visible_items = &self.sessions.items[self.sessions.scroll_offset..];
+        render_state.session_list_hits = gui
+            .display_session_list(&self.sessions.title, visible_items)
+            .await?;
         Ok(())
     }
 
@@ -956,43 +951,5 @@ fn list_scroll_delta(start: crate::lcd::TouchPoint, end: crate::lcd::TouchPoint)
         Some(-1)
     } else {
         Some(1)
-    }
-}
-
-fn is_back_swipe(start: crate::lcd::TouchPoint, end: crate::lcd::TouchPoint) -> bool {
-    let dx = end.x as i32 - start.x as i32;
-    let dy = (end.y as i32 - start.y as i32).abs();
-    dx >= crate::touch::DEFAULT_SWIPE_THRESHOLD_PX && dy <= crate::touch::DEFAULT_SWIPE_THRESHOLD_PX
-}
-
-fn is_screen_menu_point(touch: crate::lcd::TouchPoint) -> bool {
-    touch.y < 80 && touch.x >= crate::lcd::LCD_WIDTH * 2 / 3
-}
-
-fn is_screen_backspace_point(touch: crate::lcd::TouchPoint) -> bool {
-    touch.y < 80 && touch.x < crate::lcd::LCD_WIDTH / 3
-}
-
-fn is_asr_touch(touch: crate::lcd::TouchPoint) -> bool {
-    touch.y > crate::lcd::LCD_HEIGHT.saturating_sub(80)
-}
-
-fn scroll_swipe_message(
-    start: crate::lcd::TouchPoint,
-    end: crate::lcd::TouchPoint,
-) -> Option<MqttCommand> {
-    let dx = (end.x as i32 - start.x as i32).abs();
-    let dy = end.y as i32 - start.y as i32;
-    if dx > crate::touch::DEFAULT_SWIPE_THRESHOLD_PX
-        || dy.abs() < crate::touch::DEFAULT_SWIPE_THRESHOLD_PX
-    {
-        return None;
-    }
-
-    let rows = 15;
-    if dy < 0 {
-        Some(MqttCommand::SendScrollDown { rows })
-    } else {
-        Some(MqttCommand::SendScrollUp { rows })
     }
 }

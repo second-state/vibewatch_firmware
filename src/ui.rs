@@ -8,7 +8,7 @@ use embedded_graphics::{
         Rgb565, RgbColor,
     },
     prelude::*,
-    primitives::{Line, PrimitiveStyleBuilder, Rectangle, RoundedRectangle, Triangle},
+    primitives::{Line, PrimitiveStyleBuilder, Rectangle},
     text::{Alignment, Text},
 };
 use embedded_text::TextBox;
@@ -129,144 +129,6 @@ fn shifted_text_style(
         vertical_offset,
         bg_color: None,
     }
-}
-
-fn draw_microphone_icon<D>(
-    target: &mut D,
-    center: Point,
-    color: ColorFormat,
-) -> Result<(), D::Error>
-where
-    D: DrawTarget<Color = ColorFormat>,
-{
-    let style = PrimitiveStyleBuilder::new()
-        .stroke_color(color)
-        .stroke_width(3)
-        .build();
-
-    RoundedRectangle::with_equal_corners(
-        Rectangle::new(center + Point::new(-10, -20), Size::new(20, 28)),
-        Size::new(10, 10),
-    )
-    .into_styled(style)
-    .draw(target)?;
-    Line::new(center + Point::new(-18, -3), center + Point::new(-18, 4))
-        .into_styled(style)
-        .draw(target)?;
-    Line::new(center + Point::new(18, -3), center + Point::new(18, 4))
-        .into_styled(style)
-        .draw(target)?;
-    Line::new(center + Point::new(-18, 4), center + Point::new(-10, 13))
-        .into_styled(style)
-        .draw(target)?;
-    Line::new(center + Point::new(18, 4), center + Point::new(10, 13))
-        .into_styled(style)
-        .draw(target)?;
-    Line::new(center + Point::new(0, 13), center + Point::new(0, 22))
-        .into_styled(style)
-        .draw(target)?;
-    Line::new(center + Point::new(-10, 22), center + Point::new(10, 22))
-        .into_styled(style)
-        .draw(target)?;
-
-    Ok(())
-}
-
-fn draw_arrow_icon<D>(
-    target: &mut D,
-    center: Point,
-    direction: crate::touch::SwipeDirection,
-    color: ColorFormat,
-) -> Result<(), D::Error>
-where
-    D: DrawTarget<Color = ColorFormat>,
-{
-    let style = PrimitiveStyleBuilder::new().fill_color(color).build();
-    let triangle = match direction {
-        crate::touch::SwipeDirection::Left => Triangle::new(
-            center + Point::new(-15, 0),
-            center + Point::new(12, -16),
-            center + Point::new(12, 16),
-        ),
-        crate::touch::SwipeDirection::Right => Triangle::new(
-            center + Point::new(15, 0),
-            center + Point::new(-12, -16),
-            center + Point::new(-12, 16),
-        ),
-        crate::touch::SwipeDirection::Up => Triangle::new(
-            center + Point::new(0, -15),
-            center + Point::new(-16, 12),
-            center + Point::new(16, 12),
-        ),
-        crate::touch::SwipeDirection::Down => Triangle::new(
-            center + Point::new(0, 15),
-            center + Point::new(-16, -12),
-            center + Point::new(16, -12),
-        ),
-    };
-    triangle.into_styled(style).draw(target)?;
-    Ok(())
-}
-
-fn draw_backspace_icon<D>(target: &mut D, center: Point, color: ColorFormat) -> Result<(), D::Error>
-where
-    D: DrawTarget<Color = ColorFormat>,
-{
-    let style = PrimitiveStyleBuilder::new()
-        .stroke_color(color)
-        .stroke_width(4)
-        .build();
-    let x0 = center.x - 24;
-    let x1 = center.x + 26;
-    let y0 = center.y - 14;
-    let y1 = center.y;
-    let y2 = center.y + 14;
-    for line in [
-        Line::new(Point::new(x0, y1), Point::new(x1, y1)),
-        Line::new(Point::new(x0, y1), Point::new(x0 + 16, y0)),
-        Line::new(Point::new(x0, y1), Point::new(x0 + 16, y2)),
-    ] {
-        line.into_styled(style).draw(target)?;
-    }
-    Ok(())
-}
-
-fn draw_submit_icon<D>(target: &mut D, center: Point, color: ColorFormat) -> Result<(), D::Error>
-where
-    D: DrawTarget<Color = ColorFormat>,
-{
-    draw_arrow_icon(
-        target,
-        center + Point::new(0, -4),
-        crate::touch::SwipeDirection::Up,
-        color,
-    )?;
-    Line::new(center + Point::new(-18, 20), center + Point::new(18, 20))
-        .into_styled(
-            PrimitiveStyleBuilder::new()
-                .stroke_color(color)
-                .stroke_width(4)
-                .build(),
-        )
-        .draw(target)?;
-    Ok(())
-}
-
-fn draw_cancel_icon<D>(target: &mut D, center: Point, color: ColorFormat) -> Result<(), D::Error>
-where
-    D: DrawTarget<Color = ColorFormat>,
-{
-    let style = PrimitiveStyleBuilder::new()
-        .stroke_color(color)
-        .stroke_width(4)
-        .build();
-    Line::new(center + Point::new(-16, -16), center + Point::new(16, 16))
-        .into_styled(style)
-        .draw(target)?;
-    Line::new(center + Point::new(16, -16), center + Point::new(-16, 16))
-        .into_styled(style)
-        .draw(target)?;
-    Ok(())
 }
 
 type DisplayFramebuffer = Framebuffer<
@@ -860,12 +722,8 @@ pub async fn main_menu(
     gui: &mut UI,
     touch: &mut crate::touch::TouchInput,
 ) -> anyhow::Result<MainMenuSelection> {
-    let items = vec![
-        ("Remote".to_string(), false),
-        ("Setting".to_string(), false),
-    ];
     let mut title = main_menu_title();
-    let item_rects = gui.display_menu_list(&title, &items).await?;
+    let mut hit_regions = gui.display_main_menu().await?;
     log::info!("{title}: waiting for touch selection");
 
     let mut next_title_refresh = tokio::time::Instant::now() + MENU_TITLE_REFRESH_DELAY;
@@ -875,7 +733,7 @@ pub async fn main_menu(
                 next_title_refresh = tokio::time::Instant::now() + MENU_TITLE_REFRESH_DELAY;
                 let next_title = main_menu_title();
                 if next_title != title {
-                    gui.refresh_list_title(&next_title).await?;
+                    hit_regions = gui.display_main_menu().await?;
                     title = next_title;
                 }
             }
@@ -884,17 +742,14 @@ pub async fn main_menu(
                     return Err(anyhow::anyhow!("touch event source closed"));
                 };
                 if let crate::touch::TouchGesture::Click { start, end } = gesture {
-                    let press_index = list_touch_index(start, &item_rects);
-                    let release_index = list_touch_index(end, &item_rects);
-                    if press_index.is_some() && press_index == release_index {
-                        let index = press_index.unwrap();
-                        log::info!("{title}: selected item {index}");
-                        break index;
+                    if let Some(hit) = hit_regions.hit_pair(start, end) {
+                        log::info!("{title}: selected item {hit:?}");
+                        break hit;
                     }
                     log::info!(
                         "{title}: ignored touch, press={:?} release={:?}",
-                        press_index,
-                        release_index
+                        hit_regions.hit(start),
+                        hit_regions.hit(end)
                     );
                 } else if matches!(
                     gesture,
@@ -910,9 +765,9 @@ pub async fn main_menu(
         }
     };
     Ok(match index {
-        0 => MainMenuSelection::Remote,
-        1 => MainMenuSelection::Setting,
-        _ => unreachable!(),
+        crate::watch_ui::MainMenuHit::Back => MainMenuSelection::Clock,
+        crate::watch_ui::MainMenuHit::Top => MainMenuSelection::Remote,
+        crate::watch_ui::MainMenuHit::Bottom => MainMenuSelection::Setting,
     })
 }
 
@@ -1168,42 +1023,18 @@ impl UI {
 
     pub async fn show_clock(&mut self) -> anyhow::Result<()> {
         let (year, month, day, hours, minutes) = current_clock_parts();
-        self.display.clear(ColorFormat::CSS_BLACK)?;
-
-        let time_color = ColorFormat::CSS_DARK_GREEN;
-        let date_style =
-            shifted_text_style(u8g2_fonts::fonts::u8g2_font_logisoso24_tr, time_color, 0);
-        Text::with_alignment(
-            &format!("{year:04}-{month:02}-{day:02}"),
-            Point::new(DISPLAY_WIDTH as i32 / 2, DISPLAY_HEIGHT as i32 / 4),
-            date_style,
-            Alignment::Center,
-        )
-        .draw(self.display.as_mut())?;
-
-        let style = shifted_text_style(u8g2_fonts::fonts::u8g2_font_logisoso78_tn, time_color, 0);
-        let baseline_y = (DISPLAY_HEIGHT as i32 / 2) + 38;
-        Text::with_alignment(
-            &format!("{hours:02}"),
-            Point::new(DISPLAY_WIDTH as i32 / 2 - 72, baseline_y),
-            style.clone(),
-            Alignment::Center,
-        )
-        .draw(self.display.as_mut())?;
-        Text::with_alignment(
-            &format!("{minutes:02}"),
-            Point::new(DISPLAY_WIDTH as i32 / 2 + 72, baseline_y),
-            style,
-            Alignment::Center,
-        )
-        .draw(self.display.as_mut())?;
-
-        let colon_x = DISPLAY_WIDTH as i32 / 2 - 5;
-        for y in [baseline_y - 52, baseline_y - 18] {
-            Rectangle::new(Point::new(colon_x, y), Size::new(10, 10))
-                .into_styled(PrimitiveStyleBuilder::new().fill_color(time_color).build())
-                .draw(self.display.as_mut())?;
-        }
+        crate::watch_ui::render_clock(
+            self.display.as_mut(),
+            &crate::watch_ui::ClockData {
+                year: year.max(0) as u64,
+                month,
+                day,
+                hours,
+                minutes,
+                battery: crate::power::battery_percent(),
+                status: "Claude * Idle",
+            },
+        )?;
 
         self.flush_terminal_full().await?;
         Ok(())
@@ -1223,145 +1054,28 @@ impl UI {
     ) -> anyhow::Result<()> {
         self.state = state.into();
         self.text = text.into();
+        crate::watch_ui::render_status(
+            self.display.as_mut(),
+            &crate::watch_ui::StatusData {
+                title: &self.state,
+                text: &self.text,
+            },
+        )?;
         self.display_flush().await
     }
 
     /// ASR text editor, adapted from vibekeys_firmware's black TUI-style editor.
     pub async fn show_asr_editor(&mut self, text: &str, hint: &str) -> anyhow::Result<()> {
-        let display = self.display.as_mut();
-        display.clear(ColorFormat::CSS_BLACK)?;
-        let record_color = match hint {
-            "Connecting..." => ColorFormat::CSS_YELLOW,
-            "Listening..." => ColorFormat::CSS_GREEN,
-            _ => ColorFormat::CSS_WHEAT,
+        let state = match hint {
+            "Connecting..." => crate::watch_ui::VoiceState::Connecting,
+            "Listening..." => crate::watch_ui::VoiceState::Listening,
+            "ASR error" => crate::watch_ui::VoiceState::Error,
+            _ => crate::watch_ui::VoiceState::Idle,
         };
-
-        let top_h = 80;
-        for i in 0..3 {
-            let x = (DISPLAY_WIDTH / 3 * i) as i32;
-            let w = if i == 2 {
-                DISPLAY_WIDTH - DISPLAY_WIDTH / 3 * 2
-            } else {
-                DISPLAY_WIDTH / 3
-            };
-            let rect = Rectangle::new(Point::new(x + 6, 10), Size::new(w as u32 - 12, 54));
-            rect.into_styled(
-                PrimitiveStyleBuilder::new()
-                    .stroke_color(ColorFormat::CSS_WHEAT)
-                    .stroke_width(3)
-                    .build(),
-            )
-            .draw(display)?;
-            match i {
-                0 => draw_backspace_icon(display, rect.center(), ColorFormat::CSS_WHEAT)?,
-                1 => draw_submit_icon(display, rect.center(), ColorFormat::CSS_WHEAT)?,
-                _ => draw_cancel_icon(display, rect.center(), ColorFormat::CSS_WHEAT)?,
-            }
-        }
-
-        let enter_top = DISPLAY_HEIGHT as i32 - 80;
-        let content_rect = Rectangle::new(
-            Point::new(12, top_h),
-            Size::new(
-                (DISPLAY_WIDTH as u32).saturating_sub(24),
-                (enter_top - top_h - 8).max(24) as u32,
-            ),
-        );
-        let content_border_rect = Rectangle::new(
-            content_rect.top_left - Point::new(2, 2),
-            Size::new(content_rect.size.width + 4, content_rect.size.height + 4),
-        );
-        content_border_rect
-            .into_styled(
-                PrimitiveStyleBuilder::new()
-                    .stroke_color(record_color)
-                    .stroke_width(3)
-                    .build(),
-            )
-            .draw(display)?;
-        let content_style = embedded_text::style::TextBoxStyleBuilder::new()
-            .height_mode(embedded_text::style::HeightMode::FitToText)
-            .alignment(embedded_text::alignment::HorizontalAlignment::Left)
-            .line_height(embedded_graphics::text::LineHeight::Pixels(24))
-            .paragraph_spacing(12)
-            .build();
-        TextBox::with_textbox_style(
-            text,
-            content_rect,
-            shifted_text_style(u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312, TEXT_LIGHT, 3),
-            content_style,
-        )
-        .draw(display)?;
-
-        let bottom_left = 12;
-        let bottom_gap = 6;
-        let bottom_w = ((DISPLAY_WIDTH as i32 - bottom_left * 2 - bottom_gap * 2) / 3).max(1);
-        let bottom_labels = ["Left", "", "Right"];
-        let hint_style = embedded_text::style::TextBoxStyleBuilder::new()
-            .height_mode(embedded_text::style::HeightMode::FitToText)
-            .alignment(embedded_text::alignment::HorizontalAlignment::Center)
-            .line_height(embedded_graphics::text::LineHeight::Pixels(18))
-            .build();
-        for (i, label) in bottom_labels.iter().enumerate() {
-            let x = bottom_left + i as i32 * (bottom_w + bottom_gap);
-            let w = if i == 2 {
-                DISPLAY_WIDTH as i32 - bottom_left - x
-            } else {
-                bottom_w
-            };
-            let button_top = if i == 1 {
-                content_border_rect.top_left.y + content_border_rect.size.height as i32 - 1
-            } else {
-                enter_top + 8
-            };
-            let button_bottom = enter_top + 68;
-            let rect = Rectangle::new(
-                Point::new(x, button_top),
-                Size::new(w as u32, (button_bottom - button_top).max(1) as u32),
-            );
-            let color = if i == 1 {
-                record_color
-            } else {
-                ColorFormat::CSS_WHEAT
-            };
-            rect.into_styled(
-                PrimitiveStyleBuilder::new()
-                    .stroke_color(color)
-                    .stroke_width(3)
-                    .build(),
-            )
-            .draw(display)?;
-
-            if i == 0 {
-                draw_arrow_icon(
-                    display,
-                    rect.center() + Point::new(0, 2),
-                    crate::touch::SwipeDirection::Left,
-                    color,
-                )?;
-            } else if i == 1 {
-                draw_microphone_icon(display, Point::new(rect.center().x, enter_top + 38), color)?;
-            } else if i == 2 {
-                draw_arrow_icon(
-                    display,
-                    rect.center() + Point::new(0, 2),
-                    crate::touch::SwipeDirection::Right,
-                    color,
-                )?;
-            } else {
-                let text_rect = Rectangle::new(
-                    rect.top_left + Point::new(4, 18),
-                    Size::new(rect.size.width.saturating_sub(8), 40),
-                );
-                TextBox::with_textbox_style(
-                    label,
-                    text_rect,
-                    shifted_text_style(u8g2_fonts::fonts::u8g2_font_wqy12_t_gb2312a, color, 3),
-                    hint_style,
-                )
-                .draw(display)?;
-            }
-        }
+        crate::watch_ui::render_voice_input(
+            self.display.as_mut(),
+            &crate::watch_ui::VoiceInputData { text, state },
+        )?;
 
         let e = crate::lcd::async_flush_display(
             self.display.data(),
@@ -1962,5 +1676,73 @@ impl UI {
             .collect();
 
         self.display_list(title, &list_items).await
+    }
+
+    pub async fn display_main_menu(
+        &mut self,
+    ) -> anyhow::Result<crate::watch_ui::MainMenuHitRegions> {
+        let hit_regions = crate::watch_ui::render_main_menu(
+            self.display.as_mut(),
+            &crate::watch_ui::MenuTile {
+                label: "Remote",
+                icon: crate::watch_ui::Icon::Agent,
+                accent: crate::watch_ui::Palette::AMBER,
+            },
+            &crate::watch_ui::MenuTile {
+                label: "Setting",
+                icon: crate::watch_ui::Icon::Settings,
+                accent: crate::watch_ui::Palette::PURPLE,
+            },
+        )?;
+        let e = crate::lcd::async_flush_display(
+            self.display.data(),
+            0,
+            0,
+            DISPLAY_WIDTH as i32,
+            DISPLAY_HEIGHT as i32,
+        )
+        .await;
+        if e == 0 {
+            Ok(hit_regions)
+        } else {
+            Err(anyhow::anyhow!("flush main menu failed: {e}"))
+        }
+    }
+
+    pub async fn display_session_list(
+        &mut self,
+        title: &str,
+        items: &[crate::app::SessionPickerItem],
+    ) -> anyhow::Result<crate::watch_ui::SessionListHitRegions> {
+        let rows: Vec<crate::watch_ui::SessionRow<'_>> = items
+            .iter()
+            .map(|item| crate::watch_ui::SessionRow {
+                label: item.label.as_str(),
+                active: item.active,
+                working: item.working,
+            })
+            .collect();
+        let hit_regions = crate::watch_ui::render_session_list(
+            self.display.as_mut(),
+            &crate::watch_ui::SessionListData {
+                title,
+                battery: crate::power::battery_percent(),
+                rows: &rows,
+                footer: build_version_label(),
+            },
+        )?;
+        let e = crate::lcd::async_flush_display(
+            self.display.data(),
+            0,
+            0,
+            DISPLAY_WIDTH as i32,
+            DISPLAY_HEIGHT as i32,
+        )
+        .await;
+        if e == 0 {
+            Ok(hit_regions)
+        } else {
+            Err(anyhow::anyhow!("flush session list failed: {e}"))
+        }
     }
 }
