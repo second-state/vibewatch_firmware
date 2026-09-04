@@ -17,10 +17,7 @@ const DEFAULT_OTA_URL: &str =
 
 pub const OTA_DOWNLOAD_URL: &str = match option_env!("VIBEWATCH_OTA_URL") {
     Some(url) => url,
-    None => match option_env!("VIBEKEYS_OTA_URL") {
-        Some(url) => url,
-        None => DEFAULT_OTA_URL,
-    },
+    None => DEFAULT_OTA_URL,
 };
 
 static OTA_INDEX_HTML: &str = include_str!("../assets/ota_index.html");
