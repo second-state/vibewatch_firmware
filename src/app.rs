@@ -10,6 +10,7 @@ pub enum Route {
     Settings,
     SessionPicker,
     ActiveSession,
+    AsrEditor,
     BootMenu,
     ThemePicker,
     Ota,
@@ -110,9 +111,9 @@ pub struct SettingsState {
 
 #[derive(Debug, Default)]
 pub struct AsrState {
-    pub connecting: bool,
-    pub listening: bool,
     pub text: String,
+    pub cursor: usize,
+    pub hint: &'static str,
 }
 
 #[derive(Debug, Default)]
@@ -139,6 +140,7 @@ pub enum AppEvent {
 pub struct AppEventContext<'a> {
     pub session_list_hits: &'a crate::watch_ui::SessionListHitRegions,
     pub active_session_hits: &'a crate::watch_ui::ActiveSessionHitRegions,
+    pub voice_input_hits: &'a crate::watch_ui::VoiceInputHitRegions,
 }
 
 pub struct AppEventResult {
@@ -179,6 +181,7 @@ impl AppEventResult {
 pub struct AppRenderState {
     pub session_list_hits: crate::watch_ui::SessionListHitRegions,
     pub active_session_hits: crate::watch_ui::ActiveSessionHitRegions,
+    pub voice_input_hits: crate::watch_ui::VoiceInputHitRegions,
     pub next_title_refresh: tokio::time::Instant,
     pub next_mqtt_reconnect_refresh: tokio::time::Instant,
 }
@@ -194,6 +197,7 @@ impl AppRenderState {
         Self {
             session_list_hits: crate::watch_ui::SessionListHitRegions::default(),
             active_session_hits: crate::watch_ui::ActiveSessionHitRegions::default(),
+            voice_input_hits: crate::watch_ui::VoiceInputHitRegions::default(),
             next_title_refresh: tokio::time::Instant::now() + crate::ui::MENU_TITLE_REFRESH_DELAY,
             next_mqtt_reconnect_refresh: tokio::time::Instant::now()
                 + std::time::Duration::from_secs(1),
@@ -268,11 +272,17 @@ impl AppState {
     }
 
     pub fn wake_screen(&self) -> bool {
-        matches!(self.route, Route::SessionPicker | Route::ActiveSession)
+        matches!(
+            self.route,
+            Route::SessionPicker | Route::ActiveSession | Route::AsrEditor
+        )
     }
 
     pub fn request_render_for_current_route(&self) -> bool {
-        matches!(self.route, Route::SessionPicker | Route::ActiveSession)
+        matches!(
+            self.route,
+            Route::SessionPicker | Route::ActiveSession | Route::AsrEditor
+        )
     }
 
     pub fn is_mqtt_reconnecting(&self) -> bool {
@@ -326,6 +336,108 @@ impl AppState {
         self.active_session.pending_screen_chunk = None;
     }
 
+    pub fn open_asr_editor(&mut self) {
+        self.route = Route::AsrEditor;
+        self.asr.text.clear();
+        self.asr.cursor = 0;
+        self.asr.hint = "Hold Record";
+    }
+
+    pub fn return_from_asr_editor(&mut self) {
+        self.route = Route::ActiveSession;
+        self.asr.hint = "Hold Record";
+    }
+
+    pub fn set_asr_connecting(&mut self) {
+        self.asr.hint = "Connecting...";
+    }
+
+    pub fn set_asr_listening(&mut self) {
+        self.asr.hint = "Listening...";
+    }
+
+    pub fn apply_asr_result(&mut self, result: anyhow::Result<Option<String>>) {
+        match result {
+            Ok(Some(text)) => {
+                let text = text.trim();
+                log::info!("Local ASR result: {text}");
+                self.asr_insert_str(&format!("{text} "));
+                self.asr.hint = "Hold Record";
+            }
+            Ok(None) => {
+                self.asr.hint = "(empty)";
+            }
+            Err(e) => {
+                log::error!("ASR failed: {e:?}");
+                self.asr.hint = "ASR error";
+            }
+        }
+    }
+
+    pub fn asr_display_text(&self) -> String {
+        let mut out = String::with_capacity(self.asr.text.len() + 1);
+        for (i, ch) in self.asr.text.chars().enumerate() {
+            if i == self.asr.cursor {
+                out.push('|');
+            }
+            out.push(ch);
+        }
+        if self.asr.cursor >= self.asr_char_len() {
+            out.push('|');
+        }
+        out
+    }
+
+    fn asr_insert_str(&mut self, s: &str) {
+        let byte_pos = self.asr_cursor_byte_pos();
+        self.asr.text.insert_str(byte_pos, s);
+        self.asr.cursor += s.chars().count();
+    }
+
+    fn asr_backspace(&mut self) {
+        if self.asr.cursor == 0 {
+            return;
+        }
+        let byte_pos = self
+            .asr
+            .text
+            .char_indices()
+            .nth(self.asr.cursor - 1)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        self.asr.text.remove(byte_pos);
+        self.asr.cursor -= 1;
+    }
+
+    fn asr_move_left(&mut self) {
+        self.asr.cursor = self.asr.cursor.saturating_sub(1);
+    }
+
+    fn asr_move_right(&mut self) {
+        self.asr.cursor = self.asr.cursor.saturating_add(1).min(self.asr_char_len());
+    }
+
+    fn asr_take_trimmed(&mut self) -> String {
+        self.asr.text.truncate(self.asr.text.trim_end().len());
+        let text = self.asr.text.trim_start().to_string();
+        self.asr.text.clear();
+        self.asr.cursor = 0;
+        text
+    }
+
+    fn asr_char_len(&self) -> usize {
+        self.asr.text.chars().count()
+    }
+
+    fn asr_cursor_byte_pos(&self) -> usize {
+        self.asr
+            .text
+            .char_indices()
+            .nth(self.asr.cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(self.asr.text.len())
+    }
+
     pub fn handle_event(
         &mut self,
         event: AppEvent,
@@ -353,6 +465,10 @@ impl AppState {
             Route::ActiveSession => {
                 self.render_active_session(gui).await?;
             }
+            Route::AsrEditor => {
+                gui.show_asr_editor(&self.asr_display_text(), self.asr.hint)
+                    .await?;
+            }
             Route::MainMenu
             | Route::Settings
             | Route::BootMenu
@@ -375,6 +491,7 @@ impl AppState {
         match self.route {
             Route::SessionPicker => self.handle_session_picker_touch(gesture, context),
             Route::ActiveSession => self.handle_active_session_touch(gesture, context),
+            Route::AsrEditor => self.handle_asr_editor_touch(gesture, context),
             Route::MainMenu
             | Route::Settings
             | Route::BootMenu
@@ -524,7 +641,8 @@ impl AppState {
                         self.active_session.backspace_overlay = false;
                         self.active_session.menu_overlay = false;
                         self.active_session.clear_overlay = had_overlay;
-                        AppEventResult::effect(Effect::OpenAsrEditor)
+                        self.open_asr_editor();
+                        AppEventResult::render()
                     }
                     Some(
                         crate::watch_ui::ActiveSessionHit::PrevAction
@@ -546,7 +664,8 @@ impl AppState {
                 if context.active_session_hits.hit_pair(start, end)
                     == Some(crate::watch_ui::ActiveSessionHit::RunAction)
                 {
-                    AppEventResult::effect(Effect::OpenAsrEditor)
+                    self.open_asr_editor();
+                    AppEventResult::render()
                 } else {
                     AppEventResult::none()
                 }
@@ -645,10 +764,104 @@ impl AppState {
         }
     }
 
+    fn handle_asr_editor_touch(
+        &mut self,
+        gesture: TouchGesture,
+        context: &AppEventContext<'_>,
+    ) -> AppEventResult {
+        match gesture {
+            TouchGesture::Press { point } => match context.voice_input_hits.hit(point) {
+                Some(crate::watch_ui::VoiceInputHit::Left) => {
+                    self.asr_move_left();
+                    AppEventResult::render()
+                }
+                Some(crate::watch_ui::VoiceInputHit::Right) => {
+                    self.asr_move_right();
+                    AppEventResult::render()
+                }
+                Some(crate::watch_ui::VoiceInputHit::Delete) => {
+                    self.asr_backspace();
+                    AppEventResult::render()
+                }
+                Some(crate::watch_ui::VoiceInputHit::Record) => {
+                    self.set_asr_connecting();
+                    AppEventResult::render_with_effect(Effect::StartAsrRecording)
+                }
+                _ => AppEventResult::none(),
+            },
+            TouchGesture::Click { start, end } => {
+                let hit = context.voice_input_hits.hit(start);
+                if hit != context.voice_input_hits.hit(end) {
+                    return AppEventResult::none();
+                }
+                match hit {
+                    Some(crate::watch_ui::VoiceInputHit::Back) => {
+                        self.return_from_asr_editor();
+                        AppEventResult::render_with_effect(Effect::CancelAsrEditor)
+                    }
+                    Some(crate::watch_ui::VoiceInputHit::Submit) => {
+                        let text = self.asr_take_trimmed();
+                        self.return_from_asr_editor();
+                        AppEventResult::render_with_effect(Effect::SubmitAsrEditor(text))
+                    }
+                    _ => AppEventResult::none(),
+                }
+            }
+            TouchGesture::LongPress { start, end, .. } => {
+                let hit = context.voice_input_hits.hit(start);
+                if hit != context.voice_input_hits.hit(end) {
+                    return AppEventResult::none();
+                }
+                match hit {
+                    Some(crate::watch_ui::VoiceInputHit::Left) => {
+                        self.asr_move_left();
+                        AppEventResult::render()
+                    }
+                    Some(crate::watch_ui::VoiceInputHit::Right) => {
+                        self.asr_move_right();
+                        AppEventResult::render()
+                    }
+                    Some(crate::watch_ui::VoiceInputHit::Delete) => {
+                        self.asr_backspace();
+                        AppEventResult::render()
+                    }
+                    _ => AppEventResult::none(),
+                }
+            }
+            TouchGesture::Swipe { start, end, .. } => {
+                if context.voice_input_hits.hit(start).is_some() {
+                    return AppEventResult::none();
+                }
+                let dx = end.x as i32 - start.x as i32;
+                let dy = end.y as i32 - start.y as i32;
+                if dx >= crate::touch::DEFAULT_SWIPE_THRESHOLD_PX
+                    && dy.abs() <= crate::touch::DEFAULT_SWIPE_THRESHOLD_PX
+                {
+                    self.return_from_asr_editor();
+                    AppEventResult::render_with_effect(Effect::CancelAsrEditor)
+                } else if dx.abs() <= crate::touch::DEFAULT_SWIPE_THRESHOLD_PX
+                    && dy <= -crate::touch::DEFAULT_SWIPE_THRESHOLD_PX
+                {
+                    let text = self.asr_take_trimmed();
+                    self.return_from_asr_editor();
+                    AppEventResult::render_with_effect(Effect::SubmitAsrEditor(text))
+                } else {
+                    AppEventResult::none()
+                }
+            }
+            TouchGesture::SwipePreview { .. } | TouchGesture::SwipeCancel { .. } => {
+                AppEventResult::none()
+            }
+        }
+    }
+
     fn handle_mqtt_event(&mut self, event: MqttEvent) -> AppEventResult {
         match event {
             MqttEvent::ActiveScreen(chunk) => {
                 if self.sessions.reconnecting {
+                    return AppEventResult::none();
+                }
+                if self.route == Route::AsrEditor {
                     return AppEventResult::none();
                 }
                 self.route = Route::ActiveSession;
@@ -658,6 +871,9 @@ impl AppState {
             }
             MqttEvent::ActiveText(frame) => {
                 if self.sessions.reconnecting {
+                    return AppEventResult::none();
+                }
+                if self.route == Route::AsrEditor {
                     return AppEventResult::none();
                 }
                 self.route = Route::ActiveSession;
@@ -871,7 +1087,9 @@ pub enum Effect {
     ClearActiveSession,
     OpenBootMenu,
     OpenScreenMenu,
-    OpenAsrEditor,
+    StartAsrRecording,
+    SubmitAsrEditor(String),
+    CancelAsrEditor,
     SelectTheme(usize),
     PowerOff,
     Reboot,

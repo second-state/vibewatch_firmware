@@ -165,7 +165,7 @@ pub struct SessionListHitRegions {
 impl Default for SessionListHitRegions {
     fn default() -> Self {
         Self {
-            back: top_left_hit_rect(64),
+            back: top_left_scaled_hit_rect(64),
             rows: Vec::new(),
         }
     }
@@ -232,7 +232,7 @@ impl Default for ActiveSessionHitRegions {
         );
         let s = Scale::new(frame);
         Self {
-            back: top_left_hit_rect(72),
+            back: top_left_scaled_hit_rect(72),
             close: Rectangle::new(
                 Point::new(s.sx(218), s.sy(12)),
                 Size::new(s.sw(36), s.sh(36)),
@@ -380,7 +380,7 @@ impl VoiceInputHitRegions {
             )
         };
         Self {
-            back: top_left_hit_rect(72),
+            back: top_left_scaled_hit_rect(72),
             submit: Rectangle::new(
                 Point::new(s.sx(211), s.sy(13)),
                 Size::new(s.sw(40), s.sh(40)),
@@ -552,7 +552,7 @@ where
     draw_tile(target, s, first, top, true)?;
     draw_tile(target, s, second, bottom, false)?;
     Ok(MainMenuHitRegions {
-        back: top_left_hit_rect(64),
+        back: top_left_scaled_hit_rect(64),
         top: first,
         bottom: second,
     })
@@ -988,6 +988,11 @@ fn contains_touch(rect: Rectangle, touch: crate::lcd::TouchPoint) -> bool {
     x >= left && x < right && y >= top && y < bottom
 }
 
-fn top_left_hit_rect(size: u32) -> Rectangle {
-    Rectangle::new(Point::zero(), Size::new(size, size))
+fn top_left_scaled_hit_rect(size: u32) -> Rectangle {
+    let frame = Rectangle::new(
+        Point::zero(),
+        Size::new(crate::lcd::LCD_WIDTH as u32, crate::lcd::LCD_HEIGHT as u32),
+    );
+    let s = Scale::new(frame);
+    Rectangle::new(Point::zero(), Size::new(s.sw(size), s.sh(size)))
 }
