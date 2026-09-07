@@ -825,7 +825,7 @@ where
     )?;
     draw_meta(
         target,
-        "Edit task",
+        "ASR Result",
         Point::new(frame.center().x, s.sy(36)),
         Palette::DIM,
         Alignment::Center,
