@@ -140,8 +140,15 @@ pub async fn run(
                     None => std::future::pending::<()>().await,
                 }
             }, if terminal_append_render_at.is_some() => {
-                if let Err(e) = gui.render_pending_terminal_append().await {
+                if let Err(e) = gui
+                    .render_pending_terminal_append(!state.active_session.controls_visible)
+                    .await
+                {
                     log::warn!("render pending terminal append failed: {e:?}");
+                } else if state.active_session.controls_visible {
+                    render_state.active_session_hits = gui
+                        .show_active_session_controls(state.active_session.action())
+                        .await?;
                 }
             }
             // MQTT 断线重连提示的点号动画。
@@ -285,7 +292,6 @@ pub async fn run(
                         voice_input_hits: &render_state.voice_input_hits,
                     },
                 );
-                let should_render = result.render;
                 let render_after_effect = handle_app_event_result_(
                     result,
                     &mut state,
@@ -314,9 +320,6 @@ pub async fn run(
                             prompt.play_async();
                         }
                     }
-                }
-                if should_render {
-                    render_requested = true;
                 }
                 if state.route == app::Route::SessionPicker
                     && (!was_session_picker

@@ -67,6 +67,14 @@ pub struct ActiveSessionState {
     pub last_backspace_sent_at: Option<tokio::time::Instant>,
     pub pending_text_frame: Option<Vec<u8>>,
     pub pending_screen_chunk: Option<protocol::ScreenImageChunk>,
+    pub controls_visible: bool,
+    pub action_index: usize,
+}
+
+impl ActiveSessionState {
+    pub fn action(&self) -> crate::watch_ui::AgentTuiAction {
+        crate::watch_ui::AgentTuiAction::from_index(self.action_index)
+    }
 }
 
 #[derive(Default)]
@@ -348,6 +356,8 @@ impl AppState {
         self.active_session.last_backspace_sent_at = None;
         self.active_session.pending_text_frame = None;
         self.active_session.pending_screen_chunk = None;
+        self.active_session.controls_visible = false;
+        self.active_session.action_index = 0;
     }
 
     pub fn open_asr_editor(&mut self) {
@@ -487,7 +497,7 @@ impl AppState {
                     tokio::time::Instant::now() + crate::ui::MENU_TITLE_REFRESH_DELAY;
             }
             Route::ActiveSession => {
-                self.render_active_session(gui).await?;
+                self.render_active_session(gui, render_state).await?;
             }
             Route::AsrEditor => {
                 gui.show_asr_editor(&self.asr_display_text(), self.asr.hint)
@@ -594,6 +604,8 @@ impl AppState {
                 log::info!("new UI session selected: {prefix}");
                 self.route = Route::ActiveSession;
                 self.active_session.loading = true;
+                self.active_session.controls_visible = false;
+                self.active_session.action_index = 0;
 
                 AppEventResult {
                     render: true,
@@ -664,6 +676,9 @@ impl AppState {
         context: &AppEventContext<'_>,
     ) -> AppEventResult {
         match gesture {
+            TouchGesture::Press { .. } if self.active_session.controls_visible => {
+                AppEventResult::none()
+            }
             TouchGesture::Press { point } => match context.active_session_hits.hit(point) {
                 Some(crate::watch_ui::ActiveSessionHit::Close) => {
                     log::info!("new UI screen close/menu press");
@@ -674,6 +689,13 @@ impl AppState {
                 _ => AppEventResult::none(),
             },
             TouchGesture::Click { start, end } => {
+                if !self.active_session.controls_visible
+                    && crate::watch_ui::active_session_controls_trigger_hit_pair(start, end)
+                {
+                    log::info!("new UI active session controls opened");
+                    self.active_session.controls_visible = true;
+                    return AppEventResult::render();
+                }
                 let had_overlay =
                     self.active_session.backspace_overlay || self.active_session.menu_overlay;
                 match context.active_session_hits.hit_pair(start, end) {
@@ -699,18 +721,57 @@ impl AppState {
                         AppEventResult::render_with_effect(Effect::OpenScreenMenu)
                     }
                     Some(crate::watch_ui::ActiveSessionHit::RunAction) => {
-                        log::info!("new UI agent run action click");
+                        let action = self.active_session.action();
+                        log::info!("new UI agent run action click: {action:?}");
                         self.active_session.backspace_overlay = false;
                         self.active_session.menu_overlay = false;
                         self.active_session.clear_overlay = had_overlay;
-                        self.open_asr_editor();
+                        match action {
+                            crate::watch_ui::AgentTuiAction::Speak => {
+                                self.active_session.controls_visible = false;
+                                self.open_asr_editor();
+                                AppEventResult::render()
+                            }
+                            crate::watch_ui::AgentTuiAction::Accept => {
+                                AppEventResult::effect(Effect::MqttPublish(MqttCommand::SendKey {
+                                    key: "\r".to_string(),
+                                }))
+                            }
+                            crate::watch_ui::AgentTuiAction::Next => {
+                                AppEventResult::effect(Effect::MqttPublish(MqttCommand::SendKey {
+                                    key: "\x1b[B".to_string(),
+                                }))
+                            }
+                            crate::watch_ui::AgentTuiAction::Yolo => {
+                                AppEventResult::effect(Effect::MqttPublish(MqttCommand::SendKey {
+                                    key: "\x1b[Z".to_string(),
+                                }))
+                            }
+                            crate::watch_ui::AgentTuiAction::Del => {
+                                AppEventResult::effect(Effect::MqttPublish(MqttCommand::SendKey {
+                                    key: "\x7f".to_string(),
+                                }))
+                            }
+                        }
+                    }
+                    Some(crate::watch_ui::ActiveSessionHit::PrevAction) => {
+                        let count = crate::watch_ui::AgentTuiAction::ALL.len();
+                        self.active_session.action_index =
+                            (self.active_session.action_index + count - 1) % count;
                         AppEventResult::render()
                     }
-                    Some(
-                        crate::watch_ui::ActiveSessionHit::PrevAction
-                        | crate::watch_ui::ActiveSessionHit::NextAction,
-                    ) => AppEventResult::none(),
+                    Some(crate::watch_ui::ActiveSessionHit::NextAction) => {
+                        self.active_session.action_index = (self.active_session.action_index + 1)
+                            % crate::watch_ui::AgentTuiAction::ALL.len();
+                        AppEventResult::render()
+                    }
                     None => {
+                        if self.active_session.controls_visible {
+                            log::info!("new UI active session controls dismissed");
+                            self.active_session.controls_visible = false;
+                            self.active_session.clear_overlay = true;
+                            return AppEventResult::render();
+                        }
                         self.active_session.backspace_overlay = false;
                         self.active_session.menu_overlay = false;
                         self.active_session.clear_overlay = had_overlay;
@@ -725,7 +786,9 @@ impl AppState {
             TouchGesture::LongPress { start, end, .. } => {
                 if context.active_session_hits.hit_pair(start, end)
                     == Some(crate::watch_ui::ActiveSessionHit::RunAction)
+                    && self.active_session.action() == crate::watch_ui::AgentTuiAction::Speak
                 {
+                    self.active_session.controls_visible = false;
                     self.open_asr_editor();
                     AppEventResult::render()
                 } else {
@@ -739,10 +802,12 @@ impl AppState {
                 dy,
                 ..
             } => {
-                let had_overlay =
-                    self.active_session.backspace_overlay || self.active_session.menu_overlay;
+                let had_overlay = self.active_session.backspace_overlay
+                    || self.active_session.menu_overlay
+                    || self.active_session.controls_visible;
                 self.active_session.backspace_overlay = false;
                 self.active_session.menu_overlay = false;
+                self.active_session.controls_visible = false;
                 self.active_session.clear_overlay = had_overlay;
                 self.active_session.backspace_hold_sent = false;
                 self.active_session.last_backspace_sent_at = None;
@@ -758,11 +823,13 @@ impl AppState {
                 AppEventResult::render()
             }
             TouchGesture::SwipeCancel { .. } => {
-                let had_overlay =
-                    self.active_session.backspace_overlay || self.active_session.menu_overlay;
+                let had_overlay = self.active_session.backspace_overlay
+                    || self.active_session.menu_overlay
+                    || self.active_session.controls_visible;
                 let had_preview = self.active_session.scroll_preview_y_offset != 0;
                 self.active_session.backspace_overlay = false;
                 self.active_session.menu_overlay = false;
+                self.active_session.controls_visible = false;
                 self.active_session.clear_overlay = had_overlay;
                 self.active_session.backspace_hold_sent = false;
                 self.active_session.last_backspace_sent_at = None;
@@ -775,13 +842,15 @@ impl AppState {
                 }
             }
             TouchGesture::Swipe { start, end, .. } => {
-                let had_overlay =
-                    self.active_session.backspace_overlay || self.active_session.menu_overlay;
+                let had_overlay = self.active_session.backspace_overlay
+                    || self.active_session.menu_overlay
+                    || self.active_session.controls_visible;
                 let had_preview = self.active_session.scroll_preview_y_offset != 0;
                 self.active_session.scroll_preview_y_offset = 0;
                 self.active_session.scroll_preview_redraw = had_preview;
                 self.active_session.backspace_overlay = false;
                 self.active_session.menu_overlay = false;
+                self.active_session.controls_visible = false;
                 self.active_session.clear_overlay = had_overlay;
                 self.active_session.backspace_hold_sent = false;
                 self.active_session.last_backspace_sent_at = None;
@@ -1007,6 +1076,8 @@ impl AppState {
             UiEvent::SessionClicked(prefix) => {
                 self.route = Route::ActiveSession;
                 self.active_session.loading = true;
+                self.active_session.controls_visible = false;
+                self.active_session.action_index = 0;
                 AppEventResult {
                     render: true,
                     effects: vec![
@@ -1057,7 +1128,11 @@ impl AppState {
         Ok(())
     }
 
-    async fn render_active_session(&mut self, gui: &mut UI) -> anyhow::Result<()> {
+    async fn render_active_session(
+        &mut self,
+        gui: &mut UI,
+        render_state: &mut AppRenderState,
+    ) -> anyhow::Result<()> {
         if let Some(chunk) = self.active_session.pending_screen_chunk.take() {
             render_screen_chunk(gui, chunk).await?;
         }
@@ -1069,13 +1144,25 @@ impl AppState {
             // log::info!("new UI screen text frame: {}B", frame.len());
             match screen_text_frame_kind(&frame) {
                 Some(ScreenTextFrameKind::Full) => {
-                    gui.show_terminal_text_frame(&frame).await?;
+                    if self.active_session.controls_visible {
+                        gui.prepare_terminal_text_frame(&frame).await?;
+                    } else {
+                        gui.show_terminal_text_frame(&frame).await?;
+                    }
                 }
                 Some(ScreenTextFrameKind::Append) => {
-                    gui.buffer_terminal_text_frame(&frame).await?;
+                    if self.active_session.controls_visible {
+                        gui.prepare_terminal_text_frame(&frame).await?;
+                    } else {
+                        gui.buffer_terminal_text_frame(&frame).await?;
+                    }
                 }
                 None => {
-                    gui.show_terminal_text_frame(&frame).await?;
+                    if self.active_session.controls_visible {
+                        gui.prepare_terminal_text_frame(&frame).await?;
+                    } else {
+                        gui.show_terminal_text_frame(&frame).await?;
+                    }
                 }
             }
         }
@@ -1099,6 +1186,13 @@ impl AppState {
         }
         if self.active_session.menu_overlay {
             gui.show_session_menu_overlay().await?;
+        }
+        if self.active_session.controls_visible {
+            render_state.active_session_hits = gui
+                .show_active_session_controls(self.active_session.action())
+                .await?;
+        } else {
+            render_state.active_session_hits = crate::watch_ui::ActiveSessionHitRegions::default();
         }
         Ok(())
     }

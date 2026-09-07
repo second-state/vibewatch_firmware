@@ -638,6 +638,7 @@ pub struct UI {
     terminal: TerminalState,
     terminal_render_y_offset: i32,
     jpeg_screen: Option<crate::new_jpg::JpegBufferu16>,
+    active_screen_is_text: bool,
 }
 
 const DISPLAY_WIDTH: usize = crate::lcd::LCD_WIDTH as usize;
@@ -885,6 +886,7 @@ impl Default for UI {
             terminal: TerminalState::new(),
             terminal_render_y_offset: DEFAULT_TERMINAL_RENDER_Y_OFFSET,
             jpeg_screen: None,
+            active_screen_is_text: true,
             state_area,
             text_area,
             status_gif: None,
@@ -1132,6 +1134,19 @@ impl UI {
     }
 
     pub async fn show_terminal_text_frame(&mut self, payload: &[u8]) -> anyhow::Result<()> {
+        self.update_terminal_text_frame(payload, true).await
+    }
+
+    pub async fn prepare_terminal_text_frame(&mut self, payload: &[u8]) -> anyhow::Result<()> {
+        self.update_terminal_text_frame(payload, false).await
+    }
+
+    async fn update_terminal_text_frame(
+        &mut self,
+        payload: &[u8],
+        flush_to_lcd: bool,
+    ) -> anyhow::Result<()> {
+        self.active_screen_is_text = true;
         let Some((&tag, bytes)) = payload.split_first() else {
             log::warn!("empty screen_text frame");
             return Ok(());
@@ -1182,11 +1197,12 @@ impl UI {
             tokio::time::sleep(TERMINAL_APPEND_RENDER_TIMEOUT - elapsed).await;
         }
 
-        self.render_terminal_frame(tag, bytes.len(), parse_elapsed_us, full_frame)
+        self.render_terminal_frame(tag, bytes.len(), parse_elapsed_us, full_frame, flush_to_lcd)
             .await
     }
 
     pub async fn buffer_terminal_text_frame(&mut self, payload: &[u8]) -> anyhow::Result<()> {
+        self.active_screen_is_text = true;
         let Some((&tag, bytes)) = payload.split_first() else {
             log::warn!("empty screen_text frame");
             return Ok(());
@@ -1225,6 +1241,7 @@ impl UI {
         byte_len: usize,
         parse_elapsed_us: i64,
         full_frame: bool,
+        flush_to_lcd: bool,
     ) -> anyhow::Result<()> {
         let render_start_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
         let dirty = {
@@ -1241,10 +1258,10 @@ impl UI {
         let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
         let cache_len = self.terminal.ensure_session().renderer.cache_len();
 
-        let flush_elapsed_us = match (full_frame, dirty) {
-            (true, Some(_)) => self.flush_terminal_full().await?,
-            (false, Some(rect)) => self.flush_terminal_dirty(rect).await?.unwrap_or(0),
-            (_, None) => 0,
+        let flush_elapsed_us = match (flush_to_lcd, full_frame, dirty) {
+            (true, true, Some(_)) => self.flush_terminal_full().await?,
+            (true, false, Some(rect)) => self.flush_terminal_dirty(rect).await?.unwrap_or(0),
+            _ => 0,
         };
         self.terminal.last_render_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
         log::info!(
@@ -1267,7 +1284,10 @@ impl UI {
         self.terminal.append_render_deadline = None;
     }
 
-    pub async fn render_pending_terminal_append(&mut self) -> anyhow::Result<bool> {
+    pub async fn render_pending_terminal_append(
+        &mut self,
+        flush_to_lcd: bool,
+    ) -> anyhow::Result<bool> {
         if self.terminal.append_render_deadline.is_none() {
             return Ok(false);
         }
@@ -1281,9 +1301,9 @@ impl UI {
         let render_elapsed_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() } - render_start_us;
         let cache_len = self.terminal.ensure_session().renderer.cache_len();
 
-        let flush_elapsed_us = match dirty {
-            Some(rect) => self.flush_terminal_dirty(rect).await?.unwrap_or(0),
-            None => 0,
+        let flush_elapsed_us = match (flush_to_lcd, dirty) {
+            (true, Some(rect)) => self.flush_terminal_dirty(rect).await?.unwrap_or(0),
+            _ => 0,
         };
         self.terminal.last_render_us = unsafe { esp_idf_svc::sys::esp_timer_get_time() };
         log::info!(
@@ -1297,7 +1317,7 @@ impl UI {
     }
 
     pub async fn redraw_cached_terminal_text(&mut self) -> anyhow::Result<bool> {
-        if self.terminal.session.is_none() {
+        if !self.active_screen_is_text || self.terminal.session.is_none() {
             return Ok(false);
         }
         self.terminal.append_render_deadline = None;
@@ -1326,6 +1346,7 @@ impl UI {
     ) -> anyhow::Result<()> {
         screen.flush_to_lcd_async().await?;
         self.jpeg_screen = Some(screen);
+        self.active_screen_is_text = false;
         Ok(())
     }
 
@@ -1334,6 +1355,49 @@ impl UI {
             return Ok(false);
         };
         screen.flush_to_lcd_async().await?;
+        Ok(true)
+    }
+
+    pub async fn show_active_session_controls(
+        &mut self,
+        action: crate::watch_ui::AgentTuiAction,
+    ) -> anyhow::Result<crate::watch_ui::ActiveSessionHitRegions> {
+        let controls_rect =
+            crate::watch_ui::active_session_controls_rect(self.display.bounding_box());
+        let terminal_rows_rendered = self.render_terminal_tail_above(controls_rect)?;
+        let hit_regions =
+            crate::watch_ui::render_active_session_controls(self.display.as_mut(), action)?;
+        if terminal_rows_rendered {
+            self.flush_terminal_full().await?;
+        } else {
+            let _ = self.flush_terminal_dirty(controls_rect).await?;
+        }
+        Ok(hit_regions)
+    }
+
+    fn render_terminal_tail_above(&mut self, controls_rect: Rectangle) -> anyhow::Result<bool> {
+        if !self.active_screen_is_text || self.terminal.session.is_none() {
+            return Ok(false);
+        }
+
+        self.terminal.append_render_deadline = None;
+        let offset_y = self.terminal_render_y_offset;
+        let available_height = (controls_rect.top_left.y - offset_y).max(0) as u32;
+        self.display.clear(ColorFormat::CSS_BLACK)?;
+
+        let terminal = &mut self.terminal;
+        let display = &mut self.display;
+        let session = terminal.session.as_mut().expect("terminal session checked");
+        let cell_h = session.renderer.cell_size().1.max(1);
+        let visible_rows = (available_height / cell_h)
+            .min(session.renderer.rows() as u32)
+            .max(1) as u16;
+        let row_end = session.renderer.rows();
+        let row_start = row_end.saturating_sub(visible_rows);
+        let mut target = OffsetDrawTarget::new(display.as_mut(), offset_y);
+        session
+            .renderer
+            .render_rows(session.parser.screen(), &mut target, row_start, row_end)?;
         Ok(true)
     }
 

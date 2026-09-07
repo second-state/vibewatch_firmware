@@ -226,6 +226,52 @@ pub enum ActiveSessionSwipe {
     ScrollDown,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AgentTuiAction {
+    #[default]
+    Speak,
+    Accept,
+    Next,
+    Yolo,
+    Del,
+}
+
+impl AgentTuiAction {
+    pub const ALL: [Self; 5] = [Self::Speak, Self::Accept, Self::Next, Self::Yolo, Self::Del];
+
+    pub fn from_index(index: usize) -> Self {
+        Self::ALL[index % Self::ALL.len()]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Speak => "* Speak",
+            Self::Accept => "+ Accept",
+            Self::Next => "> Next",
+            Self::Yolo => "* Yolo",
+            Self::Del => "< Del",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Self::Speak | Self::Yolo => Palette::AMBER,
+            Self::Accept => Palette::GREEN,
+            Self::Next => Palette::PURPLE,
+            Self::Del => Palette::RED,
+        }
+    }
+
+    fn fill(self) -> Color {
+        match self {
+            Self::Speak | Self::Yolo => Palette::AMBER_SURFACE,
+            Self::Accept => rgb(0x1f, 0x2a, 0x15),
+            Self::Next => rgb(0x22, 0x1f, 0x34),
+            Self::Del => rgb(0x2b, 0x15, 0x17),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ActiveSessionHitRegions {
     back: Rectangle,
@@ -248,18 +294,9 @@ impl Default for ActiveSessionHitRegions {
                 Point::new(s.sx(218), s.sy(12)),
                 Size::new(s.sw(36), s.sh(36)),
             ),
-            prev_action: Rectangle::new(
-                Point::new(s.sx(20), s.sy(286)),
-                Size::new(s.sw(36), s.sh(36)),
-            ),
-            next_action: Rectangle::new(
-                Point::new(s.sx(210), s.sy(286)),
-                Size::new(s.sw(36), s.sh(36)),
-            ),
-            run_action: Rectangle::new(
-                Point::new(s.sx(67), s.sy(290)),
-                Size::new(s.sw(130), s.sh(28)),
-            ),
+            prev_action: Rectangle::zero(),
+            next_action: Rectangle::zero(),
+            run_action: Rectangle::zero(),
         }
     }
 }
@@ -333,6 +370,83 @@ impl ActiveSessionHitRegions {
             0
         }
     }
+}
+
+pub fn active_session_controls_rect(frame: Rectangle) -> Rectangle {
+    let s = Scale::new(frame);
+    Rectangle::new(
+        Point::new(frame.top_left.x, s.sy(278)),
+        Size::new(
+            frame.size.width,
+            frame.size.height.saturating_sub(s.sh(278)),
+        ),
+    )
+}
+
+pub fn active_session_controls_trigger_hit_pair(
+    start: crate::lcd::TouchPoint,
+    end: crate::lcd::TouchPoint,
+) -> bool {
+    let frame = Rectangle::new(
+        Point::zero(),
+        Size::new(crate::lcd::LCD_WIDTH as u32, crate::lcd::LCD_HEIGHT as u32),
+    );
+    let rect = active_session_controls_rect(frame);
+    contains_touch(rect, start) && contains_touch(rect, end)
+}
+
+pub fn render_active_session_controls<D>(
+    target: &mut D,
+    action: AgentTuiAction,
+) -> Result<ActiveSessionHitRegions, D::Error>
+where
+    D: DrawTarget<Color = Color>,
+{
+    let frame = target.bounding_box();
+    let s = Scale::new(frame);
+    let controls = active_session_controls_rect(frame);
+    controls
+        .into_styled(PrimitiveStyle::with_fill(Palette::BG))
+        .draw(target)?;
+
+    let prev_action = Rectangle::new(
+        Point::new(s.sx(20), s.sy(286)),
+        Size::new(s.sw(36), s.sh(36)),
+    );
+    let next_action = Rectangle::new(
+        Point::new(s.sx(210), s.sy(286)),
+        Size::new(s.sw(36), s.sh(36)),
+    );
+    let run_action = Rectangle::new(
+        Point::new(s.sx(67), s.sy(290)),
+        Size::new(s.sw(130), s.sh(28)),
+    );
+
+    for (center, icon) in [
+        (Point::new(s.sx(36), s.sy(304)), Icon::Left),
+        (Point::new(s.sx(228), s.sy(304)), Icon::Right),
+    ] {
+        Circle::with_center(center, s.sr(24))
+            .into_styled(PrimitiveStyle::with_fill(Palette::SURFACE_2))
+            .draw(target)?;
+        draw_icon(target, s, center, icon, Palette::MUTED)?;
+    }
+    round_rect(target, run_action, s.sr(14), action.fill(), None)?;
+    draw_label(
+        target,
+        action.label(),
+        run_action.center() + Point::new(0, 5),
+        action.color(),
+        Alignment::Center,
+    )?;
+
+    Ok(ActiveSessionHitRegions {
+        back: Rectangle::zero(),
+        close: Rectangle::zero(),
+        prev_action,
+        next_action,
+        run_action,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
