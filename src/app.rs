@@ -679,15 +679,7 @@ impl AppState {
             TouchGesture::Press { .. } if self.active_session.controls_visible => {
                 AppEventResult::none()
             }
-            TouchGesture::Press { point } => match context.active_session_hits.hit(point) {
-                Some(crate::watch_ui::ActiveSessionHit::Close) => {
-                    log::info!("new UI screen close/menu press");
-                    self.active_session.menu_overlay = true;
-                    self.active_session.backspace_overlay = false;
-                    AppEventResult::render()
-                }
-                _ => AppEventResult::none(),
-            },
+            TouchGesture::Press { .. } => AppEventResult::none(),
             TouchGesture::Click { start, end } => {
                 if !self.active_session.controls_visible
                     && crate::watch_ui::active_session_controls_trigger_hit_pair(start, end)
@@ -713,13 +705,6 @@ impl AppState {
                                 Effect::ClearActiveSession,
                             ],
                         }
-                    }
-                    Some(crate::watch_ui::ActiveSessionHit::Close) => {
-                        log::info!("new UI screen close/menu click");
-                        self.active_session.menu_overlay = false;
-                        self.active_session.backspace_overlay = false;
-                        self.active_session.clear_overlay = had_overlay;
-                        AppEventResult::render_with_effect(Effect::OpenScreenMenu)
                     }
                     Some(crate::watch_ui::ActiveSessionHit::RunAction) => {
                         let action = self.active_session.action();

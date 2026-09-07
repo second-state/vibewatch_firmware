@@ -213,7 +213,6 @@ impl SessionListHitRegions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveSessionHit {
     Back,
-    Close,
     PrevAction,
     NextAction,
     RunAction,
@@ -286,7 +285,6 @@ impl AgentTuiAction {
 #[derive(Debug, Clone)]
 pub struct ActiveSessionHitRegions {
     back: Rectangle,
-    close: Rectangle,
     prev_action: Rectangle,
     next_action: Rectangle,
     run_action: Rectangle,
@@ -294,17 +292,8 @@ pub struct ActiveSessionHitRegions {
 
 impl Default for ActiveSessionHitRegions {
     fn default() -> Self {
-        let frame = Rectangle::new(
-            Point::zero(),
-            Size::new(crate::lcd::LCD_WIDTH as u32, crate::lcd::LCD_HEIGHT as u32),
-        );
-        let s = Scale::new(frame);
         Self {
             back: top_left_scaled_hit_rect(72),
-            close: Rectangle::new(
-                Point::new(s.sx(218), s.sy(12)),
-                Size::new(s.sw(36), s.sh(36)),
-            ),
             prev_action: Rectangle::zero(),
             next_action: Rectangle::zero(),
             run_action: Rectangle::zero(),
@@ -316,8 +305,6 @@ impl ActiveSessionHitRegions {
     pub fn hit(&self, touch: crate::lcd::TouchPoint) -> Option<ActiveSessionHit> {
         if contains_touch(self.back, touch) {
             Some(ActiveSessionHit::Back)
-        } else if contains_touch(self.close, touch) {
-            Some(ActiveSessionHit::Close)
         } else if contains_touch(self.prev_action, touch) {
             Some(ActiveSessionHit::PrevAction)
         } else if contains_touch(self.next_action, touch) {
@@ -453,7 +440,6 @@ where
 
     Ok(ActiveSessionHitRegions {
         back: Rectangle::zero(),
-        close: Rectangle::zero(),
         prev_action,
         next_action,
         run_action,
