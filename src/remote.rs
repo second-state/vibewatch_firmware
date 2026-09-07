@@ -165,7 +165,8 @@ pub async fn run(
             _ = tokio::time::sleep_until(render_state.next_title_refresh), if state.route == app::Route::SessionPicker && backlight != BacklightMode::Off => {
                 render_state.next_title_refresh =
                     tokio::time::Instant::now() + crate::ui::MENU_TITLE_REFRESH_DELAY;
-                render_requested = state.set_session_title(session_picker_title());
+                state.set_session_title(session_picker_title());
+                render_requested = true;
             }
             // home/main/session list 长时间无交互时自动熄屏。
             _ = tokio::time::sleep_until(last_session_list_change + SESSION_LIST_IDLE_OFF_DELAY), if matches!(state.route, app::Route::Clock | app::Route::MainMenu | app::Route::SessionPicker) && backlight != BacklightMode::Off => {
@@ -1101,10 +1102,7 @@ fn idle_shutdown_title(remaining: u64) -> String {
 }
 
 fn session_picker_title() -> String {
-    match crate::power::battery_percent() {
-        Some(percent) => format!("Session: Battery {percent}%"),
-        None => "Session: Battery --".to_string(),
-    }
+    "My Agents".to_string()
 }
 
 fn list_scroll_delta(start: lcd::TouchPoint, end: lcd::TouchPoint) -> Option<isize> {
