@@ -491,10 +491,14 @@ impl Default for VoiceInputHitRegions {
 impl VoiceInputHitRegions {
     pub fn new(frame: Rectangle) -> Self {
         let s = Scale::new(frame);
+        let edit = Rectangle::new(
+            Point::new(s.sx(20), s.sy(58)),
+            Size::new(s.sw(224), s.sh(194)),
+        );
         let button_y = s.sy(270);
-        let button_w = s.sw(50);
+        let button_w = s.sw(70);
         let button_h = s.sh(40);
-        let gap = s.sw(8) as i32;
+        let gap = s.sw(7) as i32;
         let bottom_button = |index: i32| {
             Rectangle::new(
                 Point::new(s.sx(20) + index * (button_w as i32 + gap), button_y),
@@ -508,9 +512,9 @@ impl VoiceInputHitRegions {
                 Size::new(s.sw(40), s.sh(40)),
             ),
             left: bottom_button(0),
-            right: bottom_button(1),
-            delete: bottom_button(2),
-            record: bottom_button(3),
+            delete: bottom_button(1),
+            right: bottom_button(2),
+            record: edit,
         }
     }
 
@@ -839,7 +843,7 @@ where
         Point::new(s.sx(20), s.sy(58)),
         Size::new(s.sw(224), s.sh(194)),
     );
-    round_rect(target, edit, s.sr(16), Palette::PANEL_2, None)?;
+    round_rect(target, edit, s.sr(16), Palette::PANEL_2, Some(state_color))?;
     let text_rect = Rectangle::new(
         edit.top_left + Point::new(s.sw(12) as i32, s.sh(28) as i32),
         Size::new(
@@ -862,14 +866,13 @@ where
     .draw(target)?;
 
     let button_y = s.sy(270);
-    let button_w = s.sw(50);
+    let button_w = s.sw(70);
     let button_h = s.sh(40);
-    let gap = s.sw(8) as i32;
+    let gap = s.sw(7) as i32;
     for (i, (label, icon, color, fill)) in [
         ("", Some(Icon::Left), Palette::TEXT, Palette::SURFACE_2),
-        ("", Some(Icon::Right), Palette::TEXT, Palette::SURFACE_2),
         ("Del", None, Palette::RED, Palette::SURFACE_2),
-        ("Rec", None, state_color, Palette::AMBER_SURFACE),
+        ("", Some(Icon::Right), Palette::TEXT, Palette::SURFACE_2),
     ]
     .iter()
     .enumerate()
