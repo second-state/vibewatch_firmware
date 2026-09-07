@@ -1134,17 +1134,21 @@ where
                 .width as i32
             })
             .collect();
-        // Trailing spaces are dropped by the font renderer, so spans carry no
-        // boundary spaces; the renderer inserts one space width between spans.
-        let space_w = embedded_graphics::text::renderer::TextRenderer::measure_string(
-            &measure_style,
-            " ",
-            Point::zero(),
-            embedded_graphics::text::Baseline::Top,
-        )
-        .bounding_box
-        .size
-        .width as i32;
+        // Trailing/leading spaces are trimmed by the font renderer, so spans
+        // carry no boundary spaces and measuring a bare " " yields 0. Derive
+        // the space advance from "n n" vs "nn" instead.
+        let text_w = |s: &str| {
+            embedded_graphics::text::renderer::TextRenderer::measure_string(
+                &measure_style,
+                s,
+                Point::zero(),
+                embedded_graphics::text::Baseline::Top,
+            )
+            .bounding_box
+            .size
+            .width as i32
+        };
+        let space_w = (text_w("n n") - text_w("nn")).max(8);
         let gaps = (line.len() as i32 - 1).max(0);
         let total_w: i32 = widths.iter().sum::<i32>() + space_w * gaps;
         let mut x = text_rect.top_left.x + (text_rect.size.width as i32 - total_w) / 2;
@@ -1176,11 +1180,11 @@ where
         Size::new(s.sw(224), s.sh(40)),
     );
     round_rect(target, button, s.sr(14), Palette::AMBER, None)?;
-    draw_text(
+    draw_label(
         target,
         data.button_label,
         button.center() + Point::new(0, 5),
-        Palette::AMBER_SURFACE,
+        Palette::TEXT,
         Alignment::Center,
     )?;
 
