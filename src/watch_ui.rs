@@ -408,26 +408,21 @@ where
         .draw(target)?;
 
     let prev_action = Rectangle::new(
-        Point::new(s.sx(20), s.sy(286)),
-        Size::new(s.sw(36), s.sh(36)),
+        Point::new(s.sx(20), s.sy(283)),
+        Size::new(s.sw(70), s.sh(40)),
     );
     let next_action = Rectangle::new(
-        Point::new(s.sx(210), s.sy(286)),
-        Size::new(s.sw(36), s.sh(36)),
+        Point::new(s.sx(174), s.sy(283)),
+        Size::new(s.sw(70), s.sh(40)),
     );
     let run_action = Rectangle::new(
-        Point::new(s.sx(67), s.sy(290)),
-        Size::new(s.sw(130), s.sh(28)),
+        Point::new(s.sx(97), s.sy(283)),
+        Size::new(s.sw(70), s.sh(40)),
     );
 
-    for (center, icon) in [
-        (Point::new(s.sx(36), s.sy(304)), Icon::Left),
-        (Point::new(s.sx(228), s.sy(304)), Icon::Right),
-    ] {
-        Circle::with_center(center, s.sr(24))
-            .into_styled(PrimitiveStyle::with_fill(Palette::SURFACE_2))
-            .draw(target)?;
-        draw_icon(target, s, center, icon, Palette::MUTED)?;
+    for (rect, icon) in [(prev_action, Icon::Left), (next_action, Icon::Right)] {
+        round_rect(target, rect, s.sr(14), Palette::SURFACE_2, None)?;
+        draw_icon(target, s, rect.center(), icon, Palette::TEXT)?;
     }
     round_rect(target, run_action, s.sr(14), action.fill(), None)?;
     draw_label(
@@ -801,6 +796,129 @@ where
     Ok(hits)
 }
 
+#[derive(Debug, Clone)]
+pub struct SettingsListData<'a> {
+    pub title: &'a str,
+    pub battery: Option<u8>,
+    pub rows: &'a [&'a str],
+    pub footer: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct SettingsListHitRegions {
+    back: Rectangle,
+    rows: Vec<Rectangle>,
+}
+
+impl Default for SettingsListHitRegions {
+    fn default() -> Self {
+        Self {
+            back: top_left_scaled_hit_rect(64),
+            rows: Vec::new(),
+        }
+    }
+}
+
+impl SettingsListHitRegions {
+    pub fn back_hit(&self, touch: crate::lcd::TouchPoint) -> bool {
+        contains_touch(self.back, touch)
+    }
+
+    pub fn back_hit_pair(
+        &self,
+        start: crate::lcd::TouchPoint,
+        end: crate::lcd::TouchPoint,
+    ) -> bool {
+        self.back_hit(start) && self.back_hit(end)
+    }
+
+    pub fn hit_index(&self, touch: crate::lcd::TouchPoint) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|rect| contains_touch(*rect, touch))
+    }
+}
+
+pub fn render_settings_list<D>(
+    target: &mut D,
+    data: &SettingsListData<'_>,
+) -> Result<SettingsListHitRegions, D::Error>
+where
+    D: DrawTarget<Color = Color>,
+{
+    let frame = target.bounding_box();
+    target.clear(Palette::BG)?;
+    let s = Scale::new(frame);
+    draw_icon_button(
+        target,
+        s,
+        Point::new(s.sx(33), s.sy(33)),
+        Icon::Back,
+        Palette::MUTED,
+        Palette::SURFACE_2,
+    )?;
+    draw_label(
+        target,
+        data.title,
+        Point::new(s.sx(58), s.sy(37)),
+        Palette::TEXT,
+        Alignment::Left,
+    )?;
+    if let Some(percent) = data.battery {
+        draw_meta(
+            target,
+            &format!("* {percent}%"),
+            Point::new(s.sx(244), s.sy(35)),
+            battery_color(percent),
+            Alignment::Right,
+        )?;
+    }
+
+    let row_x = s.sx(20);
+    let row_w = s.sw(224);
+    let row_h = s.sh(34).max(34);
+    let row_gap = s.sh(8) as i32;
+    let mut hits = SettingsListHitRegions::default();
+    for (i, label) in data.rows.iter().enumerate() {
+        let rect = Rectangle::new(
+            Point::new(row_x, s.sy(58) + i as i32 * (row_h as i32 + row_gap)),
+            Size::new(row_w, row_h),
+        );
+        if rect.top_left.y + rect.size.height as i32 > frame.size.height as i32 - s.sh(24) as i32 {
+            break;
+        }
+        hits.rows.push(rect);
+        round_rect(target, rect, s.sr(14), Palette::SURFACE, None)?;
+        draw_label(
+            target,
+            label,
+            rect.top_left + Point::new(s.sw(16) as i32, row_h as i32 / 2 + 6),
+            Palette::TEXT,
+            Alignment::Left,
+        )?;
+        draw_text(
+            target,
+            ">",
+            Point::new(
+                rect.top_left.x + rect.size.width as i32 - s.sw(14) as i32,
+                rect.center().y + 5,
+            ),
+            Palette::DIM,
+            Alignment::Center,
+        )?;
+    }
+    if !data.footer.is_empty() {
+        draw_meta(
+            target,
+            data.footer,
+            Point::new(frame.center().x, frame.size.height as i32 - 8),
+            Palette::FAINT,
+            Alignment::Center,
+        )?;
+    }
+    Ok(hits)
+}
+
 pub fn render_voice_input<D>(target: &mut D, data: &VoiceInputData<'_>) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Color>,
@@ -899,6 +1017,177 @@ where
         }
     }
     Ok(())
+}
+
+/// A run of text inside one OTA page line; `accent: true` draws it in the accent color.
+pub struct OtaTextSpan<'a> {
+    pub text: &'a str,
+    pub accent: bool,
+}
+
+pub struct OtaPageData<'a> {
+    pub title: &'a str,
+    /// Lines of styled spans; an empty line renders as a blank separator line.
+    pub lines: &'a [Vec<OtaTextSpan<'a>>],
+    pub button_label: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct OtaPageHitRegions {
+    back: Rectangle,
+    button: Rectangle,
+}
+
+impl Default for OtaPageHitRegions {
+    fn default() -> Self {
+        Self {
+            back: top_left_scaled_hit_rect(64),
+            button: Rectangle::zero(),
+        }
+    }
+}
+
+impl OtaPageHitRegions {
+    pub fn back_hit(&self, touch: crate::lcd::TouchPoint) -> bool {
+        contains_touch(self.back, touch)
+    }
+
+    pub fn back_hit_pair(
+        &self,
+        start: crate::lcd::TouchPoint,
+        end: crate::lcd::TouchPoint,
+    ) -> bool {
+        self.back_hit(start) && self.back_hit(end)
+    }
+
+    pub fn button_hit_pair(
+        &self,
+        start: crate::lcd::TouchPoint,
+        end: crate::lcd::TouchPoint,
+    ) -> bool {
+        contains_touch(self.button, start) && contains_touch(self.button, end)
+    }
+}
+
+pub fn render_ota_page<D>(
+    target: &mut D,
+    data: &OtaPageData<'_>,
+) -> Result<OtaPageHitRegions, D::Error>
+where
+    D: DrawTarget<Color = Color>,
+{
+    let frame = target.bounding_box();
+    target.clear(Palette::BG)?;
+    let s = Scale::new(frame);
+    draw_icon_button(
+        target,
+        s,
+        Point::new(s.sx(33), s.sy(33)),
+        Icon::Back,
+        Palette::MUTED,
+        Palette::SURFACE_2,
+    )?;
+    draw_meta(
+        target,
+        data.title,
+        Point::new(frame.center().x, s.sy(36)),
+        Palette::DIM,
+        Alignment::Center,
+    )?;
+
+    let edit = Rectangle::new(
+        Point::new(s.sx(20), s.sy(58)),
+        Size::new(s.sw(224), s.sh(194)),
+    );
+    round_rect(target, edit, s.sr(16), Palette::PANEL_2, None)?;
+    let text_rect = Rectangle::new(
+        edit.top_left + Point::new(s.sw(12) as i32, s.sh(12) as i32),
+        Size::new(
+            edit.size.width.saturating_sub(s.sw(24)),
+            edit.size.height.saturating_sub(s.sh(24)),
+        ),
+    );
+    // Centered manual line layout so individual spans can use the accent color.
+    let line_height = 30i32;
+    let mut y = text_rect.top_left.y;
+    for line in data.lines {
+        if line.is_empty() {
+            y += line_height + 6;
+            continue;
+        }
+        let measure_style = crate::ui::shifted_text_style(
+            u8g2_fonts::fonts::u8g2_font_unifont_t_gb2312,
+            Palette::TEXT,
+            3,
+        );
+        let widths: Vec<i32> = line
+            .iter()
+            .map(|span| {
+                embedded_graphics::text::renderer::TextRenderer::measure_string(
+                    &measure_style,
+                    span.text,
+                    Point::zero(),
+                    embedded_graphics::text::Baseline::Top,
+                )
+                .bounding_box
+                .size
+                .width as i32
+            })
+            .collect();
+        // Trailing spaces are dropped by the font renderer, so spans carry no
+        // boundary spaces; the renderer inserts one space width between spans.
+        let space_w = embedded_graphics::text::renderer::TextRenderer::measure_string(
+            &measure_style,
+            " ",
+            Point::zero(),
+            embedded_graphics::text::Baseline::Top,
+        )
+        .bounding_box
+        .size
+        .width as i32;
+        let gaps = (line.len() as i32 - 1).max(0);
+        let total_w: i32 = widths.iter().sum::<i32>() + space_w * gaps;
+        let mut x = text_rect.top_left.x + (text_rect.size.width as i32 - total_w) / 2;
+        for (span, width) in line.iter().zip(widths) {
+            let color = if span.accent {
+                Palette::AMBER
+            } else {
+                Palette::TEXT
+            };
+            let style = crate::ui::shifted_text_style(
+                u8g2_fonts::fonts::u8g2_font_unifont_t_gb2312,
+                color,
+                3,
+            );
+            embedded_graphics::text::renderer::TextRenderer::draw_string(
+                &style,
+                span.text,
+                Point::new(x, y),
+                embedded_graphics::text::Baseline::Top,
+                target,
+            )?;
+            x += width + space_w;
+        }
+        y += line_height;
+    }
+
+    let button = Rectangle::new(
+        Point::new(s.sx(20), s.sy(270)),
+        Size::new(s.sw(224), s.sh(40)),
+    );
+    round_rect(target, button, s.sr(14), Palette::AMBER, None)?;
+    draw_text(
+        target,
+        data.button_label,
+        button.center() + Point::new(0, 5),
+        Palette::AMBER_SURFACE,
+        Alignment::Center,
+    )?;
+
+    Ok(OtaPageHitRegions {
+        back: top_left_scaled_hit_rect(64),
+        button,
+    })
 }
 
 fn draw_tile<D>(

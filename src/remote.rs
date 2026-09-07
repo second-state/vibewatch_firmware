@@ -64,6 +64,7 @@ pub async fn run(
     audio_prompt: Option<&audio::PromptPlayer>,
     mut audio_prompt_enabled: bool,
     nvs: &esp_idf_svc::nvs::EspDefaultNvs,
+    start_in_settings: bool,
 ) -> anyhow::Result<crate::ui::SettingMenuSelection> {
     log::info!("Connecting to MQTT broker {uri} as {client_id} with new UI loop");
     let mut server = match MqttServer::new(&uri, &client_id).await {
@@ -78,6 +79,10 @@ pub async fn run(
     log::info!("MQTT connected, entering new UI session list");
 
     let mut state = app::AppState::session_picker();
+    if start_in_settings {
+        state.route = app::Route::Settings;
+        state.settings.exit_action = None;
+    }
     let mut render_requested = true;
 
     let mut backlight = BacklightMode::Normal;
@@ -234,6 +239,7 @@ pub async fn run(
                         session_list_hits: &render_state.session_list_hits,
                         active_session_hits: &render_state.active_session_hits,
                         voice_input_hits: &render_state.voice_input_hits,
+                        settings_hits: &render_state.settings_hits,
                     },
                 );
                 let render_after_effect = handle_app_event_result_(
@@ -254,9 +260,16 @@ pub async fn run(
                 if render_after_effect {
                     render_requested = true;
                 }
-                if state.route == app::Route::Settings {
+                if let Some(action) = state.settings.exit_action.take() {
+                    log::info!("new UI settings action {action:?}, leaving remote loop");
                     touch.cancel_active_gesture();
-                    return crate::ui::setting_menu(gui, touch).await;
+                    return Ok(match action {
+                        app::SettingAction::Ota => crate::ui::SettingMenuSelection::Ota,
+                        app::SettingAction::SyncTime => crate::ui::SettingMenuSelection::SyncTime,
+                        app::SettingAction::Ble => crate::ui::SettingMenuSelection::Ble,
+                        app::SettingAction::Reboot => crate::ui::SettingMenuSelection::Reboot,
+                        app::SettingAction::PowerOff => crate::ui::SettingMenuSelection::PowerOff,
+                    });
                 }
                 if matches!(state.route, app::Route::Clock | app::Route::MainMenu | app::Route::SessionPicker) {
                     last_session_list_change = tokio::time::Instant::now();
@@ -291,6 +304,7 @@ pub async fn run(
                         session_list_hits: &render_state.session_list_hits,
                         active_session_hits: &render_state.active_session_hits,
                         voice_input_hits: &render_state.voice_input_hits,
+                        settings_hits: &render_state.settings_hits,
                     },
                 );
                 let render_after_effect = handle_app_event_result_(

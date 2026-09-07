@@ -51,45 +51,83 @@ pub async fn run(
     log::info!("OTA: WiFi connected, IP {}", ip);
 
     let (tx, rx) = std::sync::mpsc::channel::<OtaEvent>();
-    let screen_tx = tx.clone();
+    let ui_tx = tx.clone();
     let _http_server = ota_http_server(tx)?;
-    let ota_worker = std::thread::Builder::new()
+    // Worker reports back only on failure; a successful download reboots inside the worker.
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel::<()>();
+    let _ota_worker = std::thread::Builder::new()
         .name("ota-worker".to_string())
         .stack_size(1024 * 24)
         .spawn(move || {
-            if let Err(e) = ota_task(rx) {
-                log::error!("OTA worker failed: {e:?}");
+            while let Ok(ev) = rx.recv() {
+                let result = match ev {
+                    OtaEvent::DataChunk(first) => ota_write_upload(&rx, first),
+                    OtaEvent::DownloadLatest => ota_download_latest(),
+                    OtaEvent::Complete => continue,
+                };
+                if let Err(e) = result {
+                    log::error!("OTA attempt failed: {e:?}");
+                    let _ = attempt_tx.send(());
+                }
             }
         })?;
 
-    let items = vec![
-        ("Update release".to_string(), false),
-        ("Restart".to_string(), false),
-    ];
-    let title = format!("OTA: {}", ip);
-    let index = crate::ui::select_menu_item(gui, touch, &title, &items).await?;
-    match index {
-        0 => {
-            log::info!("OTA screen button selected: download latest");
-            gui.show_status("OTA Mode", "Downloading latest...\nDevice will reboot")
-                .await
-                .ok();
-            screen_tx.send(OtaEvent::DownloadLatest).map_err(|e| {
-                log::error!("OTA channel closed: {:?}", e);
-                anyhow::anyhow!("OTA channel closed: {:?}", e)
-            })?;
-        }
-        1 => {
-            log::info!("OTA screen button selected: restart");
-            gui.show_status("OTA Mode", "Restarting...").await.ok();
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            restart();
-        }
-        _ => unreachable!(),
+    let title = "OTA";
+    fn span(text: &str, accent: bool) -> crate::watch_ui::OtaTextSpan<'_> {
+        crate::watch_ui::OtaTextSpan { text, accent }
     }
-
-    let _ = ota_worker.join();
-    Ok(())
+    let url = format!("http://{ip}");
+    let lines = vec![
+        vec![
+            span("Open", false),
+            span(&url, true),
+            span("to upload", false),
+        ],
+        vec![span("a firmware update.", false)],
+        vec![],
+        vec![
+            span("Or", false),
+            span("tap the button below", true),
+            span("to", false),
+        ],
+        vec![span("download the latest release.", false)],
+    ];
+    let button_label = "Update release";
+    let mut hits = gui.display_ota_page(title, &lines, button_label).await?;
+    loop {
+        match touch.next_gesture().await {
+            Some(crate::touch::TouchGesture::Click { start, end }) => {
+                if hits.back_hit_pair(start, end) {
+                    log::info!("OTA screen: back selected");
+                    return Ok(());
+                }
+                if hits.button_hit_pair(start, end) {
+                    log::info!("OTA screen button selected: download latest");
+                    gui.show_status("OTA Mode", "Downloading latest...\nDevice will reboot")
+                        .await
+                        .ok();
+                    ui_tx.send(OtaEvent::DownloadLatest).map_err(|e| {
+                        log::error!("OTA channel closed: {:?}", e);
+                        anyhow::anyhow!("OTA channel closed: {:?}", e)
+                    })?;
+                    // Success never reaches here: the worker reboots the device.
+                    let _ = attempt_rx.recv();
+                    gui.show_status("OTA Mode", "Download failed").await.ok();
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    hits = gui.display_ota_page(title, &lines, button_label).await?;
+                }
+            }
+            Some(crate::touch::TouchGesture::Swipe {
+                direction: crate::touch::SwipeDirection::Right,
+                ..
+            }) => {
+                log::info!("OTA screen: right swipe, going back to settings");
+                return Ok(());
+            }
+            Some(_) => {}
+            None => return Err(anyhow::anyhow!("touch event source closed")),
+        }
+    }
 }
 
 fn ota_http_server(
@@ -157,20 +195,8 @@ fn ota_http_server(
     Ok(server)
 }
 
-fn ota_task(rx: std::sync::mpsc::Receiver<OtaEvent>) -> anyhow::Result<()> {
-    while let Ok(ev) = rx.recv() {
-        match ev {
-            OtaEvent::DataChunk(data) => return ota_write_upload(rx, data),
-            OtaEvent::DownloadLatest => return ota_download_latest(),
-            OtaEvent::Complete => {}
-        }
-    }
-
-    Ok(())
-}
-
 fn ota_write_upload(
-    rx: std::sync::mpsc::Receiver<OtaEvent>,
+    rx: &std::sync::mpsc::Receiver<OtaEvent>,
     first_chunk: Vec<u8>,
 ) -> anyhow::Result<()> {
     let mut ota = EspOta::new()?;

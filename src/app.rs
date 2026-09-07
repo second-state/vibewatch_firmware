@@ -110,9 +110,19 @@ pub struct BootMenuState {
     pub selected_index: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingAction {
+    Ota,
+    SyncTime,
+    Ble,
+    Reboot,
+    PowerOff,
+}
+
 #[derive(Debug, Default)]
 pub struct SettingsState {
     pub selected_index: Option<usize>,
+    pub exit_action: Option<SettingAction>,
 }
 
 #[derive(Debug, Default)]
@@ -148,6 +158,7 @@ pub struct AppEventContext<'a> {
     pub session_list_hits: &'a crate::watch_ui::SessionListHitRegions,
     pub active_session_hits: &'a crate::watch_ui::ActiveSessionHitRegions,
     pub voice_input_hits: &'a crate::watch_ui::VoiceInputHitRegions,
+    pub settings_hits: &'a crate::watch_ui::SettingsListHitRegions,
 }
 
 pub struct AppEventResult {
@@ -190,6 +201,7 @@ pub struct AppRenderState {
     pub session_list_hits: crate::watch_ui::SessionListHitRegions,
     pub active_session_hits: crate::watch_ui::ActiveSessionHitRegions,
     pub voice_input_hits: crate::watch_ui::VoiceInputHitRegions,
+    pub settings_hits: crate::watch_ui::SettingsListHitRegions,
     pub next_clock_tick: tokio::time::Instant,
     pub next_title_refresh: tokio::time::Instant,
     pub next_mqtt_reconnect_refresh: tokio::time::Instant,
@@ -208,6 +220,7 @@ impl AppRenderState {
             session_list_hits: crate::watch_ui::SessionListHitRegions::default(),
             active_session_hits: crate::watch_ui::ActiveSessionHitRegions::default(),
             voice_input_hits: crate::watch_ui::VoiceInputHitRegions::default(),
+            settings_hits: crate::watch_ui::SettingsListHitRegions::default(),
             next_clock_tick: tokio::time::Instant::now() + std::time::Duration::from_secs(1),
             next_title_refresh: tokio::time::Instant::now() + crate::ui::MENU_TITLE_REFRESH_DELAY,
             next_mqtt_reconnect_refresh: tokio::time::Instant::now()
@@ -500,7 +513,10 @@ impl AppState {
                 gui.show_asr_editor(&self.asr_display_text(), self.asr.hint)
                     .await?;
             }
-            Route::Settings | Route::BootMenu | Route::ThemePicker | Route::Ota => {}
+            Route::Settings => {
+                render_state.settings_hits = gui.display_settings_list().await?;
+            }
+            Route::BootMenu | Route::ThemePicker | Route::Ota => {}
         }
 
         Ok(())
@@ -521,9 +537,8 @@ impl AppState {
             Route::SessionPicker => self.handle_session_picker_touch(gesture, context),
             Route::ActiveSession => self.handle_active_session_touch(gesture, context),
             Route::AsrEditor => self.handle_asr_editor_touch(gesture, context),
-            Route::Settings | Route::BootMenu | Route::ThemePicker | Route::Ota => {
-                AppEventResult::none()
-            }
+            Route::Settings => self.handle_settings_touch(gesture, context),
+            Route::BootMenu | Route::ThemePicker | Route::Ota => AppEventResult::none(),
         }
     }
 
@@ -554,6 +569,7 @@ impl AppState {
                 }
                 Some(crate::watch_ui::MainMenuHit::Bottom) => {
                     self.route = Route::Settings;
+                    self.settings.exit_action = None;
                     AppEventResult::render()
                 }
                 None => AppEventResult::none(),
@@ -648,6 +664,50 @@ impl AppState {
                 }
                 crate::touch::SwipeDirection::Left => AppEventResult::none(),
             },
+        }
+    }
+
+    fn handle_settings_touch(
+        &mut self,
+        gesture: TouchGesture,
+        context: &AppEventContext<'_>,
+    ) -> AppEventResult {
+        match gesture {
+            TouchGesture::Press { .. } => AppEventResult::none(),
+            TouchGesture::Click { start, end } => {
+                if context.settings_hits.back_hit_pair(start, end) {
+                    self.route = Route::MainMenu;
+                    return AppEventResult::none();
+                }
+                let press_index = context.settings_hits.hit_index(start);
+                let release_index = context.settings_hits.hit_index(end);
+                if press_index.is_none() || press_index != release_index {
+                    return AppEventResult::none();
+                }
+
+                let action = match press_index.unwrap() {
+                    0 => SettingAction::Ota,
+                    1 => SettingAction::SyncTime,
+                    2 => SettingAction::Ble,
+                    3 => SettingAction::Reboot,
+                    4 => SettingAction::PowerOff,
+                    _ => return AppEventResult::none(),
+                };
+                log::info!("new UI settings action selected: {action:?}");
+                self.settings.exit_action = Some(action);
+                AppEventResult::none()
+            }
+            TouchGesture::LongPress { .. }
+            | TouchGesture::SwipePreview { .. }
+            | TouchGesture::SwipeCancel { .. } => AppEventResult::none(),
+            TouchGesture::Swipe {
+                direction: crate::touch::SwipeDirection::Right,
+                ..
+            } => {
+                self.route = Route::MainMenu;
+                AppEventResult::none()
+            }
+            TouchGesture::Swipe { .. } => AppEventResult::none(),
         }
     }
 

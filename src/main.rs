@@ -101,57 +101,65 @@ fn main() -> anyhow::Result<()> {
     let mut wifi = network::WifiManager::new(peripherals.modem, sysloop)?;
     // Volatile by design: after a reboot, the clock must be verified/synced again.
     let mut time_synced = false;
+    // Set after leaving the OTA page via back/right swipe so the next remote
+    // session reopens directly on the settings page.
+    let mut reenter_remote_settings = false;
 
     loop {
-        let mode = 'home: loop {
-            runtime.block_on(ui::clock_screen(&mut gui, &mut touch, &mut boot_button))?;
-            loop {
-                match runtime.block_on(ui::main_menu(&mut gui, &mut touch))? {
-                    ui::MainMenuSelection::Clock => continue 'home,
-                    ui::MainMenuSelection::Remote => break 'home ui::MainMenuSelection::Remote,
-                    ui::MainMenuSelection::Setting => {
-                        match runtime.block_on(ui::setting_menu(&mut gui, &mut touch))? {
-                            ui::SettingMenuSelection::Ota => {
-                                break 'home ui::MainMenuSelection::Setting;
-                            }
-                            ui::SettingMenuSelection::SyncTime => {
-                                if runtime
-                                    .block_on(sync_time_from_settings(
-                                        &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
-                                    ))
-                                    .unwrap_or(false)
-                                {
-                                    time_synced = true;
+        let skip_home = reenter_remote_settings;
+        reenter_remote_settings = false;
+        if !skip_home {
+            'home: loop {
+                runtime.block_on(ui::clock_screen(&mut gui, &mut touch, &mut boot_button))?;
+                loop {
+                    match runtime.block_on(ui::main_menu(&mut gui, &mut touch))? {
+                        ui::MainMenuSelection::Clock => continue 'home,
+                        ui::MainMenuSelection::Remote => break 'home,
+                        ui::MainMenuSelection::Setting => {
+                            loop {
+                                match runtime.block_on(ui::setting_menu(&mut gui, &mut touch))? {
+                                    ui::SettingMenuSelection::Ota => {
+                                        runtime.block_on(ota::run(
+                                            &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
+                                        ))?;
+                                        // OTA page backed out: reopen the settings page.
+                                    }
+                                    ui::SettingMenuSelection::SyncTime => {
+                                        if runtime
+                                            .block_on(sync_time_from_settings(
+                                                &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
+                                            ))
+                                            .unwrap_or(false)
+                                        {
+                                            time_synced = true;
+                                        }
+                                    }
+                                    ui::SettingMenuSelection::Ble => {
+                                        runtime
+                                            .block_on(gui.show_status(
+                                                "BLE Setup",
+                                                "Connect BLE \"Watch\"\nopen setup.html",
+                                            ))
+                                            .ok();
+                                        if let Err(e) = ble_provision::provision(nvs) {
+                                            log::error!("BLE provision failed: {e:?}");
+                                            std::thread::sleep(std::time::Duration::from_secs(3));
+                                        }
+                                        restart();
+                                    }
+                                    ui::SettingMenuSelection::Reboot => restart(),
+                                    ui::SettingMenuSelection::PowerOff => {
+                                        crate::power::shutdown();
+                                        loop {
+                                            std::thread::sleep(std::time::Duration::from_secs(60));
+                                        }
+                                    }
+                                    ui::SettingMenuSelection::Back => break,
                                 }
-                                continue;
                             }
-                            ui::SettingMenuSelection::Ble => {
-                                runtime
-                                    .block_on(gui.show_status(
-                                        "BLE Setup",
-                                        "Connect BLE \"Watch\"\nopen setup.html",
-                                    ))
-                                    .ok();
-                                if let Err(e) = ble_provision::provision(nvs) {
-                                    log::error!("BLE provision failed: {e:?}");
-                                    std::thread::sleep(std::time::Duration::from_secs(3));
-                                }
-                                restart();
-                            }
-                            ui::SettingMenuSelection::Back => continue,
                         }
                     }
                 }
-            }
-        };
-        match mode {
-            ui::MainMenuSelection::Clock => unreachable!(),
-            ui::MainMenuSelection::Remote => {}
-            ui::MainMenuSelection::Setting => {
-                runtime.block_on(ota::run(
-                    &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
-                ))?;
-                return Ok(());
             }
         }
 
@@ -225,6 +233,7 @@ fn main() -> anyhow::Result<()> {
             audio_prompt_player.as_ref(),
             audio_prompt_enabled,
             &nvs,
+            skip_home,
         )) {
             Ok(selection) => {
                 wifi.disconnect_and_stop();
@@ -233,7 +242,8 @@ fn main() -> anyhow::Result<()> {
                         runtime.block_on(ota::run(
                             &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
                         ))?;
-                        return Ok(());
+                        // OTA page backed out: reopen the remote UI on the settings page.
+                        reenter_remote_settings = true;
                     }
                     ui::SettingMenuSelection::SyncTime => {
                         if runtime
@@ -259,6 +269,13 @@ fn main() -> anyhow::Result<()> {
                             std::thread::sleep(std::time::Duration::from_secs(3));
                         }
                         restart();
+                    }
+                    ui::SettingMenuSelection::Reboot => restart(),
+                    ui::SettingMenuSelection::PowerOff => {
+                        crate::power::shutdown();
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(60));
+                        }
                     }
                     ui::SettingMenuSelection::Back => {}
                 }

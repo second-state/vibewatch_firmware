@@ -622,6 +622,8 @@ pub enum SettingMenuSelection {
     Ota,
     SyncTime,
     Ble,
+    Reboot,
+    PowerOff,
     Back,
 }
 
@@ -800,20 +802,44 @@ pub async fn setting_menu(
     gui: &mut UI,
     touch: &mut crate::touch::TouchInput,
 ) -> anyhow::Result<SettingMenuSelection> {
-    let items = vec![
-        ("OTA Update".to_string(), false),
-        ("Sync Time".to_string(), false),
-        ("Enable BLE".to_string(), false),
-        ("Back".to_string(), false),
-    ];
-    let index = select_menu_item(gui, touch, "Setting", &items).await?;
-    Ok(match index {
-        0 => SettingMenuSelection::Ota,
-        1 => SettingMenuSelection::SyncTime,
-        2 => SettingMenuSelection::Ble,
-        3 => SettingMenuSelection::Back,
-        _ => unreachable!(),
-    })
+    let mut hits = gui.display_settings_list().await?;
+    log::info!("settings: waiting for touch selection");
+    loop {
+        match touch.next_gesture().await {
+            Some(crate::touch::TouchGesture::Click { start, end }) => {
+                if hits.back_hit_pair(start, end) {
+                    log::info!("settings: back selected");
+                    return Ok(SettingMenuSelection::Back);
+                }
+                let press_index = hits.hit_index(start);
+                let release_index = hits.hit_index(end);
+                if press_index.is_some() && press_index == release_index {
+                    let selection = match press_index.unwrap() {
+                        0 => SettingMenuSelection::Ota,
+                        1 => SettingMenuSelection::SyncTime,
+                        2 => SettingMenuSelection::Ble,
+                        3 => SettingMenuSelection::Reboot,
+                        4 => SettingMenuSelection::PowerOff,
+                        _ => {
+                            hits = gui.display_settings_list().await?;
+                            continue;
+                        }
+                    };
+                    log::info!("settings: selected item {}", press_index.unwrap());
+                    return Ok(selection);
+                }
+            }
+            Some(crate::touch::TouchGesture::Swipe {
+                direction: crate::touch::SwipeDirection::Right,
+                ..
+            }) => {
+                log::info!("settings: right swipe, going back");
+                return Ok(SettingMenuSelection::Back);
+            }
+            Some(_) => {}
+            None => return Err(anyhow::anyhow!("touch event source closed")),
+        }
+    }
 }
 
 pub async fn select_menu_item(
@@ -1760,6 +1786,69 @@ impl UI {
             Ok(hit_regions)
         } else {
             Err(anyhow::anyhow!("flush session list failed: {e}"))
+        }
+    }
+
+    pub async fn display_settings_list(
+        &mut self,
+    ) -> anyhow::Result<crate::watch_ui::SettingsListHitRegions> {
+        let rows: &[&str] = &[
+            "OTA Update",
+            "Sync Time",
+            "Enable BLE",
+            "Reboot",
+            "Power Off",
+        ];
+        let hit_regions = crate::watch_ui::render_settings_list(
+            self.display.as_mut(),
+            &crate::watch_ui::SettingsListData {
+                title: "Settings",
+                battery: crate::power::battery_percent(),
+                rows,
+                footer: build_version_label(),
+            },
+        )?;
+        let e = crate::lcd::async_flush_display(
+            self.display.data(),
+            0,
+            0,
+            DISPLAY_WIDTH as i32,
+            DISPLAY_HEIGHT as i32,
+        )
+        .await;
+        if e == 0 {
+            Ok(hit_regions)
+        } else {
+            Err(anyhow::anyhow!("flush settings list failed: {e}"))
+        }
+    }
+
+    pub async fn display_ota_page(
+        &mut self,
+        title: &str,
+        lines: &[Vec<crate::watch_ui::OtaTextSpan<'_>>],
+        button_label: &str,
+    ) -> anyhow::Result<crate::watch_ui::OtaPageHitRegions> {
+        let hit_regions = crate::watch_ui::render_ota_page(
+            self.display.as_mut(),
+            &crate::watch_ui::OtaPageData {
+                title,
+                lines,
+                button_label,
+            },
+        )?;
+        let e = crate::lcd::async_flush_display(
+            self.display.data(),
+            0,
+            0,
+            DISPLAY_WIDTH as i32,
+            DISPLAY_HEIGHT as i32,
+        )
+        .await;
+        if e == 0 {
+            Ok(hit_regions)
+        } else {
+            Err(anyhow::anyhow!("flush ota page failed: {e}"))
         }
     }
 }
