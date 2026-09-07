@@ -845,10 +845,10 @@ where
     );
     round_rect(target, edit, s.sr(16), Palette::PANEL_2, Some(state_color))?;
     let text_rect = Rectangle::new(
-        edit.top_left + Point::new(s.sw(12) as i32, s.sh(28) as i32),
+        edit.top_left + Point::new(s.sw(12) as i32, s.sh(12) as i32),
         Size::new(
             edit.size.width.saturating_sub(s.sw(24)),
-            edit.size.height.saturating_sub(s.sh(40)),
+            edit.size.height.saturating_sub(s.sh(24)),
         ),
     );
     let text_style = embedded_text::style::TextBoxStyleBuilder::new()
@@ -860,7 +860,11 @@ where
     TextBox::with_textbox_style(
         data.text,
         text_rect,
-        terminal_style(Palette::TEXT),
+        crate::ui::shifted_text_style(
+            u8g2_fonts::fonts::u8g2_font_unifont_t_gb2312,
+            Palette::TEXT,
+            3,
+        ),
         text_style,
     )
     .draw(target)?;

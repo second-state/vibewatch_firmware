@@ -23,7 +23,7 @@ type TerminalRenderer = embedded_graphics_terminal::TerminalRenderer;
 pub const TEXT_LIGHT: UiColor = UiColor::CSS_LIGHT_GRAY;
 
 #[derive(Debug, Clone)]
-struct MyTextStyle {
+pub(crate) struct MyTextStyle {
     font_style: U8g2TextStyle<ColorFormat>,
     vertical_offset: i32,
     bg_color: Option<ColorFormat>,
@@ -118,7 +118,7 @@ impl embedded_graphics::text::renderer::CharacterStyle for MyTextStyle {
     }
 }
 
-fn shifted_text_style(
+pub(crate) fn shifted_text_style(
     font: impl u8g2_fonts::Font,
     color: ColorFormat,
     vertical_offset: i32,
