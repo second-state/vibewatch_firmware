@@ -2,8 +2,6 @@
 
 use crate::{mqtt::MqttEvent, protocol, touch::TouchGesture, ui::UI};
 
-const SESSION_PICKER_BOOT_LONG_PRESS_COUNT: u8 = 5;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     Clock,
@@ -42,7 +40,6 @@ pub struct SessionListState {
     pub loading: bool,
     pub reconnecting: bool,
     pub reconnect_dots: usize,
-    pub boot_long_press_count: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -578,12 +575,8 @@ impl AppState {
         context: &AppEventContext<'_>,
     ) -> AppEventResult {
         match gesture {
-            TouchGesture::Press { .. } => {
-                self.sessions.boot_long_press_count = 0;
-                AppEventResult::none()
-            }
+            TouchGesture::Press { .. } => AppEventResult::none(),
             TouchGesture::Click { start, end } => {
-                self.sessions.boot_long_press_count = 0;
                 if context.session_list_hits.back_hit_pair(start, end) {
                     self.route = Route::MainMenu;
                     return AppEventResult::none();
@@ -615,58 +608,46 @@ impl AppState {
                     ],
                 }
             }
-            TouchGesture::LongPress { .. } => {
-                self.sessions.boot_long_press_count =
-                    self.sessions.boot_long_press_count.saturating_add(1);
-                if self.sessions.boot_long_press_count >= SESSION_PICKER_BOOT_LONG_PRESS_COUNT {
-                    self.sessions.boot_long_press_count = 0;
-                    AppEventResult::effect(Effect::OpenBootMenu)
-                } else {
-                    AppEventResult::none()
-                }
-            }
-            TouchGesture::SwipePreview { .. } | TouchGesture::SwipeCancel { .. } => {
-                AppEventResult::none()
-            }
+            TouchGesture::LongPress { .. }
+            | TouchGesture::SwipePreview { .. }
+            | TouchGesture::SwipeCancel { .. } => AppEventResult::none(),
             TouchGesture::Swipe {
                 start,
                 end,
                 direction,
                 dx,
                 dy,
-            } => {
-                self.sessions.boot_long_press_count = 0;
-                match direction {
-                    crate::touch::SwipeDirection::Right => {
-                        log::info!("new UI session list right swipe detected, opening system menu");
-                        AppEventResult::effect(Effect::OpenBootMenu)
-                    }
-                    crate::touch::SwipeDirection::Up | crate::touch::SwipeDirection::Down => {
-                        let Some(delta) = list_scroll_delta(start, end) else {
-                            return AppEventResult::none();
-                        };
-                        let visible_count = context.session_list_hits.visible_count().max(1);
-                        let next_offset = apply_scroll_delta(
-                            self.sessions.scroll_offset,
-                            self.sessions.items.len(),
-                            visible_count,
-                            delta,
-                        );
-                        if next_offset == self.sessions.scroll_offset {
-                            return AppEventResult::none();
-                        }
-                        self.sessions.scroll_offset = next_offset;
-                        log::info!(
-                            "new UI session list scroll offset={} dx={} dy={}",
-                            self.sessions.scroll_offset,
-                            dx,
-                            dy
-                        );
-                        AppEventResult::render()
-                    }
-                    crate::touch::SwipeDirection::Left => AppEventResult::none(),
+            } => match direction {
+                crate::touch::SwipeDirection::Right => {
+                    log::info!("new UI session list right swipe detected, going back to main menu");
+                    self.route = Route::MainMenu;
+                    AppEventResult::none()
                 }
-            }
+                crate::touch::SwipeDirection::Up | crate::touch::SwipeDirection::Down => {
+                    let Some(delta) = list_scroll_delta(start, end) else {
+                        return AppEventResult::none();
+                    };
+                    let visible_count = context.session_list_hits.visible_count().max(1);
+                    let next_offset = apply_scroll_delta(
+                        self.sessions.scroll_offset,
+                        self.sessions.items.len(),
+                        visible_count,
+                        delta,
+                    );
+                    if next_offset == self.sessions.scroll_offset {
+                        return AppEventResult::none();
+                    }
+                    self.sessions.scroll_offset = next_offset;
+                    log::info!(
+                        "new UI session list scroll offset={} dx={} dy={}",
+                        self.sessions.scroll_offset,
+                        dx,
+                        dy
+                    );
+                    AppEventResult::render()
+                }
+                crate::touch::SwipeDirection::Left => AppEventResult::none(),
+            },
         }
     }
 
