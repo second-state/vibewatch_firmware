@@ -6,6 +6,7 @@ const SESSION_PICKER_BOOT_LONG_PRESS_COUNT: u8 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
+    Clock,
     MainMenu,
     Settings,
     SessionPicker,
@@ -138,6 +139,7 @@ pub enum AppEvent {
 }
 
 pub struct AppEventContext<'a> {
+    pub main_menu_hits: &'a crate::watch_ui::MainMenuHitRegions,
     pub session_list_hits: &'a crate::watch_ui::SessionListHitRegions,
     pub active_session_hits: &'a crate::watch_ui::ActiveSessionHitRegions,
     pub voice_input_hits: &'a crate::watch_ui::VoiceInputHitRegions,
@@ -179,9 +181,11 @@ impl AppEventResult {
 }
 
 pub struct AppRenderState {
+    pub main_menu_hits: crate::watch_ui::MainMenuHitRegions,
     pub session_list_hits: crate::watch_ui::SessionListHitRegions,
     pub active_session_hits: crate::watch_ui::ActiveSessionHitRegions,
     pub voice_input_hits: crate::watch_ui::VoiceInputHitRegions,
+    pub next_clock_tick: tokio::time::Instant,
     pub next_title_refresh: tokio::time::Instant,
     pub next_mqtt_reconnect_refresh: tokio::time::Instant,
 }
@@ -195,9 +199,11 @@ pub struct SessionSyncResult {
 impl AppRenderState {
     pub fn new() -> Self {
         Self {
+            main_menu_hits: crate::watch_ui::MainMenuHitRegions::default(),
             session_list_hits: crate::watch_ui::SessionListHitRegions::default(),
             active_session_hits: crate::watch_ui::ActiveSessionHitRegions::default(),
             voice_input_hits: crate::watch_ui::VoiceInputHitRegions::default(),
+            next_clock_tick: tokio::time::Instant::now() + std::time::Duration::from_secs(1),
             next_title_refresh: tokio::time::Instant::now() + crate::ui::MENU_TITLE_REFRESH_DELAY,
             next_mqtt_reconnect_refresh: tokio::time::Instant::now()
                 + std::time::Duration::from_secs(1),
@@ -274,14 +280,22 @@ impl AppState {
     pub fn wake_screen(&self) -> bool {
         matches!(
             self.route,
-            Route::SessionPicker | Route::ActiveSession | Route::AsrEditor
+            Route::Clock
+                | Route::MainMenu
+                | Route::SessionPicker
+                | Route::ActiveSession
+                | Route::AsrEditor
         )
     }
 
     pub fn request_render_for_current_route(&self) -> bool {
         matches!(
             self.route,
-            Route::SessionPicker | Route::ActiveSession | Route::AsrEditor
+            Route::Clock
+                | Route::MainMenu
+                | Route::SessionPicker
+                | Route::ActiveSession
+                | Route::AsrEditor
         )
     }
 
@@ -457,6 +471,16 @@ impl AppState {
         render_state: &mut AppRenderState,
     ) -> anyhow::Result<()> {
         match self.route {
+            Route::Clock => {
+                gui.show_clock().await?;
+                render_state.next_clock_tick =
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+            }
+            Route::MainMenu => {
+                render_state.main_menu_hits = gui.display_main_menu().await?;
+                render_state.next_title_refresh =
+                    tokio::time::Instant::now() + crate::ui::MENU_TITLE_REFRESH_DELAY;
+            }
             Route::SessionPicker => {
                 self.render_session_picker(gui, render_state).await?;
                 render_state.next_title_refresh =
@@ -469,11 +493,7 @@ impl AppState {
                 gui.show_asr_editor(&self.asr_display_text(), self.asr.hint)
                     .await?;
             }
-            Route::MainMenu
-            | Route::Settings
-            | Route::BootMenu
-            | Route::ThemePicker
-            | Route::Ota => {}
+            Route::Settings | Route::BootMenu | Route::ThemePicker | Route::Ota => {}
         }
 
         Ok(())
@@ -489,14 +509,56 @@ impl AppState {
         context: &AppEventContext<'_>,
     ) -> AppEventResult {
         match self.route {
+            Route::Clock => self.handle_clock_touch(gesture),
+            Route::MainMenu => self.handle_main_menu_touch(gesture, context),
             Route::SessionPicker => self.handle_session_picker_touch(gesture, context),
             Route::ActiveSession => self.handle_active_session_touch(gesture, context),
             Route::AsrEditor => self.handle_asr_editor_touch(gesture, context),
-            Route::MainMenu
-            | Route::Settings
-            | Route::BootMenu
-            | Route::ThemePicker
-            | Route::Ota => AppEventResult::none(),
+            Route::Settings | Route::BootMenu | Route::ThemePicker | Route::Ota => {
+                AppEventResult::none()
+            }
+        }
+    }
+
+    fn handle_clock_touch(&mut self, gesture: TouchGesture) -> AppEventResult {
+        if matches!(gesture, TouchGesture::Click { .. }) {
+            self.route = Route::MainMenu;
+            AppEventResult::render()
+        } else {
+            AppEventResult::none()
+        }
+    }
+
+    fn handle_main_menu_touch(
+        &mut self,
+        gesture: TouchGesture,
+        context: &AppEventContext<'_>,
+    ) -> AppEventResult {
+        match gesture {
+            TouchGesture::Click { start, end } => match context.main_menu_hits.hit_pair(start, end)
+            {
+                Some(crate::watch_ui::MainMenuHit::Back) => {
+                    self.route = Route::Clock;
+                    AppEventResult::render()
+                }
+                Some(crate::watch_ui::MainMenuHit::Top) => {
+                    self.route = Route::SessionPicker;
+                    AppEventResult::render()
+                }
+                Some(crate::watch_ui::MainMenuHit::Bottom) => {
+                    self.route = Route::Settings;
+                    AppEventResult::render()
+                }
+                None => AppEventResult::none(),
+            },
+            TouchGesture::Swipe {
+                direction: crate::touch::SwipeDirection::Right,
+                ..
+            } => {
+                self.route = Route::Clock;
+                AppEventResult::render()
+            }
+            _ => AppEventResult::none(),
         }
     }
 

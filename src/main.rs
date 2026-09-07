@@ -99,130 +99,181 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut wifi = network::WifiManager::new(peripherals.modem, sysloop)?;
+    // Volatile by design: after a reboot, the clock must be verified/synced again.
+    let mut time_synced = false;
 
-    let mode = 'home: loop {
-        runtime.block_on(ui::clock_screen(&mut gui, &mut touch, &mut boot_button))?;
-        loop {
-            match runtime.block_on(ui::main_menu(&mut gui, &mut touch))? {
-                ui::MainMenuSelection::Clock => continue 'home,
-                ui::MainMenuSelection::Remote => break 'home ui::MainMenuSelection::Remote,
-                ui::MainMenuSelection::Setting => {
-                    match runtime.block_on(ui::setting_menu(&mut gui, &mut touch))? {
-                        ui::SettingMenuSelection::Ota => {
-                            break 'home ui::MainMenuSelection::Setting;
-                        }
-                        ui::SettingMenuSelection::SyncTime => {
-                            runtime
-                                .block_on(sync_time_from_settings(
-                                    &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
-                                ))
-                                .ok();
-                            continue;
-                        }
-                        ui::SettingMenuSelection::Ble => {
-                            runtime
-                                .block_on(gui.show_status(
-                                    "BLE Setup",
-                                    "Connect BLE \"Watch\"\nopen setup.html",
-                                ))
-                                .ok();
-                            if let Err(e) = ble_provision::provision(nvs) {
-                                log::error!("BLE provision failed: {e:?}");
-                                std::thread::sleep(std::time::Duration::from_secs(3));
+    loop {
+        let mode = 'home: loop {
+            runtime.block_on(ui::clock_screen(&mut gui, &mut touch, &mut boot_button))?;
+            loop {
+                match runtime.block_on(ui::main_menu(&mut gui, &mut touch))? {
+                    ui::MainMenuSelection::Clock => continue 'home,
+                    ui::MainMenuSelection::Remote => break 'home ui::MainMenuSelection::Remote,
+                    ui::MainMenuSelection::Setting => {
+                        match runtime.block_on(ui::setting_menu(&mut gui, &mut touch))? {
+                            ui::SettingMenuSelection::Ota => {
+                                break 'home ui::MainMenuSelection::Setting;
                             }
-                            restart();
+                            ui::SettingMenuSelection::SyncTime => {
+                                if runtime
+                                    .block_on(sync_time_from_settings(
+                                        &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
+                                    ))
+                                    .unwrap_or(false)
+                                {
+                                    time_synced = true;
+                                }
+                                continue;
+                            }
+                            ui::SettingMenuSelection::Ble => {
+                                runtime
+                                    .block_on(gui.show_status(
+                                        "BLE Setup",
+                                        "Connect BLE \"Watch\"\nopen setup.html",
+                                    ))
+                                    .ok();
+                                if let Err(e) = ble_provision::provision(nvs) {
+                                    log::error!("BLE provision failed: {e:?}");
+                                    std::thread::sleep(std::time::Duration::from_secs(3));
+                                }
+                                restart();
+                            }
+                            ui::SettingMenuSelection::Back => continue,
                         }
-                        ui::SettingMenuSelection::Back => continue,
                     }
                 }
             }
-        }
-    };
-    match mode {
-        ui::MainMenuSelection::Clock => unreachable!(),
-        ui::MainMenuSelection::Remote => {}
-        ui::MainMenuSelection::Setting => {
-            runtime.block_on(ota::run(
-                &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
-            ))?;
-            return Ok(());
-        }
-    }
-
-    // 连 WiFi:从 wifi_list 里挑第一个在范围内的(顺序=优先级)
-    runtime
-        .block_on(gui.show_status("Connecting WiFi...", ""))
-        .ok();
-
-    let wifi_result = wifi.connect(&setting.wifi_list);
-    if let Err(e) = wifi_result.as_ref() {
-        runtime
-            .block_on(gui.show_status("WiFi failed", format!("{e:?}\nReset in 5s...")))
-            .ok();
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        restart();
-    }
-    log::info!("WiFi connected");
-    runtime.block_on(network::sync_time_and_timezone_with_ui(
-        &mut gui, &mut touch, &mut nvs,
-    ))?;
-
-    // Remote:MQTT 连 vibetty → 进入 session list(停留等输入选会话)
-    runtime
-        .block_on(gui.show_status("Connecting MQTT...", setting.server_url.clone()))
-        .ok();
-
-    let client_id = wifi_sta_mac_client_id();
-    let (asr_tx, asr_rx) = std::sync::mpsc::channel::<audio::AsrRequest>();
-    if let Err(e) = std::thread::Builder::new()
-        .name("asr-worker".to_string())
-        .stack_size(1024 * 16)
-        .spawn(move || {
-            let mut driver = audio::Driver::new()
-                .map_err(|e| log::error!("Failed to create audio driver: {e:?}"))
-                .ok();
-            while let Ok(req) = asr_rx.recv() {
-                let mut listening = Some(req.listening);
-                let result = match driver.as_mut() {
-                    Some(driver) => driver.start_asr(
-                        &req.config,
-                        || {
-                            if let Some(tx) = listening.take() {
-                                let _ = tx.send(());
-                            }
-                        },
-                        || req.cancel.load(std::sync::atomic::Ordering::Relaxed),
-                    ),
-                    None => Err(anyhow::anyhow!("audio driver unavailable")),
-                };
-                let _ = req.respond.send(result);
+        };
+        match mode {
+            ui::MainMenuSelection::Clock => unreachable!(),
+            ui::MainMenuSelection::Remote => {}
+            ui::MainMenuSelection::Setting => {
+                runtime.block_on(ota::run(
+                    &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
+                ))?;
+                return Ok(());
             }
-            log::info!("ASR worker thread exited");
-        })
-    {
-        log::error!("Failed to spawn ASR worker thread: {e:?}");
+        }
+
+        // 连 WiFi:从 wifi_list 里挑第一个在范围内的(顺序=优先级)
+        runtime
+            .block_on(gui.show_status("Connecting WiFi...", ""))
+            .ok();
+
+        let wifi_result = wifi.connect(&setting.wifi_list);
+        if let Err(e) = wifi_result.as_ref() {
+            runtime
+                .block_on(gui.show_status("WiFi failed", format!("{e:?}\nReset in 5s...")))
+                .ok();
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            restart();
+        }
+        log::info!("WiFi connected");
+        if time_synced {
+            log::info!("Time already synced since boot; skipping time sync");
+        } else {
+            time_synced = runtime.block_on(network::sync_time_and_timezone_with_ui(
+                &mut gui, &mut touch, &mut nvs,
+            ))?;
+            log::info!("Time sync completed for this boot: {time_synced}");
+        }
+
+        // Remote:MQTT 连 vibetty → 进入 session list(停留等输入选会话)
+        runtime
+            .block_on(gui.show_status("Connecting MQTT...", setting.server_url.clone()))
+            .ok();
+
+        let client_id = wifi_sta_mac_client_id();
+        let (asr_tx, asr_rx) = std::sync::mpsc::channel::<audio::AsrRequest>();
+        if let Err(e) = std::thread::Builder::new()
+            .name("asr-worker".to_string())
+            .stack_size(1024 * 16)
+            .spawn(move || {
+                let mut driver = audio::Driver::new()
+                    .map_err(|e| log::error!("Failed to create audio driver: {e:?}"))
+                    .ok();
+                while let Ok(req) = asr_rx.recv() {
+                    let mut listening = Some(req.listening);
+                    let result = match driver.as_mut() {
+                        Some(driver) => driver.start_asr(
+                            &req.config,
+                            || {
+                                if let Some(tx) = listening.take() {
+                                    let _ = tx.send(());
+                                }
+                            },
+                            || req.cancel.load(std::sync::atomic::Ordering::Relaxed),
+                        ),
+                        None => Err(anyhow::anyhow!("audio driver unavailable")),
+                    };
+                    let _ = req.respond.send(result);
+                }
+                log::info!("ASR worker thread exited");
+            })
+        {
+            log::error!("Failed to spawn ASR worker thread: {e:?}");
+        }
+
+        match runtime.block_on(remote::run(
+            setting.server_url.clone(),
+            client_id,
+            &mut gui,
+            &mut touch,
+            &mut boot_button,
+            asr_tx,
+            asr_config.as_ref(),
+            audio_prompt_player.as_ref(),
+            audio_prompt_enabled,
+            &nvs,
+        )) {
+            Ok(selection) => {
+                wifi.disconnect_and_stop();
+                match selection {
+                    ui::SettingMenuSelection::Ota => {
+                        runtime.block_on(ota::run(
+                            &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
+                        ))?;
+                        return Ok(());
+                    }
+                    ui::SettingMenuSelection::SyncTime => {
+                        if runtime
+                            .block_on(sync_time_from_settings(
+                                &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
+                            ))
+                            .unwrap_or(false)
+                        {
+                            time_synced = true;
+                        }
+                    }
+                    ui::SettingMenuSelection::Ble => {
+                        runtime
+                            .block_on(
+                                gui.show_status(
+                                    "BLE Setup",
+                                    "Connect BLE \"Watch\"\nopen setup.html",
+                                ),
+                            )
+                            .ok();
+                        if let Err(e) = ble_provision::provision(nvs) {
+                            log::error!("BLE provision failed: {e:?}");
+                            std::thread::sleep(std::time::Duration::from_secs(3));
+                        }
+                        restart();
+                    }
+                    ui::SettingMenuSelection::Back => {}
+                }
+            }
+            Err(e) => {
+                log::info!("remote exited: {:?}", e);
+                let mut gui = ui::UI::default();
+                runtime
+                    .block_on(gui.show_status("Disconnected", format!("{e:?}")))
+                    .ok();
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                restart();
+            }
+        }
     }
-
-    let r = runtime.block_on(remote::run(
-        setting.server_url,
-        client_id,
-        &mut gui,
-        touch,
-        boot_button,
-        asr_tx,
-        asr_config.as_ref(),
-        audio_prompt_player.as_ref(),
-        audio_prompt_enabled,
-        &nvs,
-    ));
-    log::info!("remote exited: {:?}", r);
-
-    let mut gui = ui::UI::default();
-    runtime
-        .block_on(gui.show_status("Disconnected", format!("{:?}", r)))
-        .ok();
-    std::thread::sleep(std::time::Duration::from_secs(5));
-    restart();
 }
 
 async fn sync_time_from_settings(
@@ -231,7 +282,7 @@ async fn sync_time_from_settings(
     gui: &mut ui::UI,
     touch: &mut touch::TouchInput,
     nvs: &mut esp_idf_svc::nvs::EspDefaultNvs,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     gui.show_status("Sync Time", "Connecting WiFi...")
         .await
         .ok();
@@ -240,10 +291,12 @@ async fn sync_time_from_settings(
             let result = network::sync_time_and_timezone_with_ui(gui, touch, nvs).await;
             wifi.disconnect_and_stop();
             match result {
-                Ok(()) => {
-                    gui.show_status("Sync Time", "Done").await.ok();
+                Ok(synced) => {
+                    gui.show_status("Sync Time", if synced { "Done" } else { "Skipped" })
+                        .await
+                        .ok();
                     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                    Ok(())
+                    Ok(synced)
                 }
                 Err(e) => {
                     gui.show_status("Sync Time", format!("{e:?}")).await.ok();

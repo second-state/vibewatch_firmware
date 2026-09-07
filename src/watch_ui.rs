@@ -95,7 +95,8 @@ pub struct ClockData<'a> {
     pub status: &'a str,
 }
 
-pub struct StatusData<'a> {
+/// Read-only notice screen used for connection, sync, OTA, and error messages.
+pub struct NoticeData<'a> {
     pub title: &'a str,
     pub text: &'a str,
 }
@@ -140,6 +141,16 @@ impl MainMenuHitRegions {
     ) -> Option<MainMenuHit> {
         let start_hit = self.hit(start)?;
         (Some(start_hit) == self.hit(end)).then_some(start_hit)
+    }
+}
+
+impl Default for MainMenuHitRegions {
+    fn default() -> Self {
+        Self {
+            back: Rectangle::zero(),
+            top: Rectangle::zero(),
+            bottom: Rectangle::zero(),
+        }
     }
 }
 
@@ -485,7 +496,8 @@ where
     Ok(())
 }
 
-pub fn render_status<D>(target: &mut D, data: &StatusData<'_>) -> Result<(), D::Error>
+/// Render a non-interactive notice using the same visual language as the other watch screens.
+pub fn render_notice<D>(target: &mut D, data: &NoticeData<'_>) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Color>,
 {
@@ -493,31 +505,46 @@ where
     target.clear(Palette::BG)?;
     let s = Scale::new(frame);
     let panel = Rectangle::new(
-        Point::new(s.sx(20), s.sy(86)),
-        Size::new(s.sw(224), s.sh(156)),
+        Point::new(s.sx(20), s.sy(66)),
+        Size::new(s.sw(224), s.sh(196)),
     );
-    round_rect(
-        target,
-        panel,
-        s.sr(24),
-        Palette::PANEL,
-        Some(Palette::SURFACE_2),
-    )?;
+    round_rect(target, panel, s.sr(16), Palette::PANEL_2, None)?;
+    let title_y = if data.text.is_empty() {
+        panel.center().y + 5
+    } else {
+        panel.top_left.y + s.sh(54) as i32
+    };
     draw_label(
         target,
         data.title,
-        Point::new(panel.center().x, panel.top_left.y + s.sh(54) as i32),
+        Point::new(panel.center().x, title_y),
         Palette::TEXT,
         Alignment::Center,
     )?;
     if !data.text.is_empty() {
-        draw_meta(
-            target,
+        let text_rect = Rectangle::new(
+            Point::new(
+                panel.top_left.x + s.sw(16) as i32,
+                panel.top_left.y + s.sh(82) as i32,
+            ),
+            Size::new(
+                panel.size.width.saturating_sub(s.sw(32)),
+                panel.size.height.saturating_sub(s.sh(98)),
+            ),
+        );
+        let text_box_style = embedded_text::style::TextBoxStyleBuilder::new()
+            .height_mode(embedded_text::style::HeightMode::FitToText)
+            .alignment(embedded_text::alignment::HorizontalAlignment::Center)
+            .line_height(embedded_graphics::text::LineHeight::Pixels(22))
+            .paragraph_spacing(10)
+            .build();
+        TextBox::with_textbox_style(
             data.text,
-            Point::new(panel.center().x, panel.top_left.y + s.sh(96) as i32),
-            Palette::MUTED,
-            Alignment::Center,
-        )?;
+            text_rect,
+            terminal_style(Palette::MUTED),
+            text_box_style,
+        )
+        .draw(target)?;
     }
     Ok(())
 }

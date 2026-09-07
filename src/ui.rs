@@ -11,7 +11,6 @@ use embedded_graphics::{
     primitives::{Line, PrimitiveStyleBuilder, Rectangle},
     text::{Alignment, Text},
 };
-use embedded_text::TextBox;
 use std::sync::{
     atomic::{AtomicI32, AtomicUsize, Ordering},
     OnceLock,
@@ -1054,14 +1053,14 @@ impl UI {
     ) -> anyhow::Result<()> {
         self.state = state.into();
         self.text = text.into();
-        crate::watch_ui::render_status(
+        crate::watch_ui::render_notice(
             self.display.as_mut(),
-            &crate::watch_ui::StatusData {
+            &crate::watch_ui::NoticeData {
                 title: &self.state,
                 text: &self.text,
             },
         )?;
-        self.display_flush().await
+        self.flush_notice().await
     }
 
     /// ASR text editor, adapted from vibekeys_firmware's black TUI-style editor.
@@ -1458,53 +1457,7 @@ impl UI {
         Ok((rect, box_rect))
     }
 
-    // 横向42个字符
-    async fn display_flush(&mut self) -> anyhow::Result<()> {
-        if let Some(gif) = self.status_gif.as_ref() {
-            for frame in gif.frames() {
-                frame.draw(self.display.as_mut())?;
-            }
-        } else {
-            self.display.clear(ColorFormat::CSS_BLACK)?;
-        }
-
-        self.state_background
-            .iter()
-            .cloned()
-            .draw(self.display.as_mut())?;
-        self.text_background
-            .iter()
-            .cloned()
-            .draw(self.display.as_mut())?;
-
-        Text::with_alignment(
-            &self.state,
-            self.state_area.center(),
-            U8g2TextStyle::new(
-                u8g2_fonts::fonts::u8g2_font_wqy12_t_gb2312a,
-                ColorFormat::CSS_LIGHT_CYAN,
-            ),
-            Alignment::Center,
-        )
-        .draw(self.display.as_mut())?;
-
-        let textbox_style = embedded_text::style::TextBoxStyleBuilder::new()
-            .height_mode(embedded_text::style::HeightMode::FitToText)
-            .alignment(embedded_text::alignment::HorizontalAlignment::Center)
-            .line_height(embedded_graphics::text::LineHeight::Pixels(20))
-            .paragraph_spacing(20)
-            .build();
-        let text_box = TextBox::with_textbox_style(
-            &self.text,
-            self.text_area,
-            U8g2TextStyle::new(
-                u8g2_fonts::fonts::u8g2_font_wqy16_t_gb2312,
-                ColorFormat::CSS_WHEAT,
-            ),
-            textbox_style,
-        );
-        text_box.draw(self.display.as_mut())?;
-
+    async fn flush_notice(&self) -> anyhow::Result<()> {
         for i in 0..5 {
             let e = crate::lcd::async_flush_display(
                 self.display.data(),

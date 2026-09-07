@@ -57,14 +57,14 @@ pub async fn run(
     uri: String,
     client_id: String,
     gui: &mut UI,
-    mut touch: touch::TouchInput,
-    mut boot_button: BootButton,
+    touch: &mut touch::TouchInput,
+    boot_button: &mut BootButton,
     asr_tx: std::sync::mpsc::Sender<audio::AsrRequest>,
     asr_config: Option<&audio::AsrConfig>,
     audio_prompt: Option<&audio::PromptPlayer>,
     mut audio_prompt_enabled: bool,
     nvs: &esp_idf_svc::nvs::EspDefaultNvs,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<crate::ui::SettingMenuSelection> {
     log::info!("Connecting to MQTT broker {uri} as {client_id} with new UI loop");
     let mut server = match MqttServer::new(&uri, &client_id).await {
         Ok(s) => s,
@@ -150,15 +150,19 @@ pub async fn run(
                     tokio::time::Instant::now() + std::time::Duration::from_secs(1);
                 render_requested = state.tick_mqtt_reconnecting();
             }
+            // 时钟页面每秒刷新一次时间。
+            _ = tokio::time::sleep_until(render_state.next_clock_tick), if state.route == app::Route::Clock && backlight != BacklightMode::Off => {
+                render_requested = true;
+            }
             // 定时刷新 session list 标题里的电量。
             _ = tokio::time::sleep_until(render_state.next_title_refresh), if state.route == app::Route::SessionPicker && backlight != BacklightMode::Off => {
                 render_state.next_title_refresh =
                     tokio::time::Instant::now() + crate::ui::MENU_TITLE_REFRESH_DELAY;
                 render_requested = state.set_session_title(session_picker_title());
             }
-            // session list 长时间无变化时自动熄屏。
-            _ = tokio::time::sleep_until(last_session_list_change + SESSION_LIST_IDLE_OFF_DELAY), if state.route == app::Route::SessionPicker && backlight != BacklightMode::Off => {
-                log::info!("Session list unchanged for 30s, turning screen off");
+            // home/main/session list 长时间无交互时自动熄屏。
+            _ = tokio::time::sleep_until(last_session_list_change + SESSION_LIST_IDLE_OFF_DELAY), if matches!(state.route, app::Route::Clock | app::Route::MainMenu | app::Route::SessionPicker) && backlight != BacklightMode::Off => {
+                log::info!("Home/menu/session list idle for 30s, turning screen off");
                 execute_simple_effect_(
                     app::Effect::SetBacklight(app::BacklightState::Off),
                     &mut server,
@@ -178,16 +182,16 @@ pub async fn run(
                 .await?;
                 session_list_off_since = None;
                 last_session_list_change = tokio::time::Instant::now();
-                if show_idle_shutdown_prompt(&mut server, gui, &mut touch).await? {
+                if show_idle_shutdown_prompt(&mut server, gui, touch).await? {
                     render_requested = state.request_render_for_current_route();
                 } else {
                     log::warn!("Idle shutdown countdown expired, shutting down");
                     execute_simple_effect_(app::Effect::PowerOff, &mut server, &mut backlight).await?;
                 }
             }
-            // 物理 BOOT 键在 session list 中用于熄屏。
-            _ = crate::boot::wait_boot_press(&mut boot_button), if state.route == app::Route::SessionPicker => {
-                log::info!("BOOT button pressed from new UI session list, turning screen off");
+            // 物理 BOOT 键在 home/main/session list 中用于熄屏。
+            _ = crate::boot::wait_boot_press(boot_button), if matches!(state.route, app::Route::Clock | app::Route::MainMenu | app::Route::SessionPicker) => {
+                log::info!("BOOT button pressed from new UI idle route, turning screen off");
                 execute_simple_effect_(
                     app::Effect::SetBacklight(app::BacklightState::Off),
                     &mut server,
@@ -199,8 +203,7 @@ pub async fn run(
             // 触摸手势进入 AppState，由 state 决定渲染和 effect。
             gesture = touch.next_gesture() => {
                 let Some(gesture) = gesture else {
-                    log::warn!("Touch event source closed, exiting new UI loop");
-                    break;
+                    return Err(anyhow::anyhow!("touch event source closed"));
                 };
                 if backlight == BacklightMode::Off {
                     log::info!("Touch while screen is off, restoring backlight");
@@ -219,6 +222,7 @@ pub async fn run(
                 let result = state.handle_event(
                     app::AppEvent::Touch(gesture),
                     &app::AppEventContext {
+                        main_menu_hits: &render_state.main_menu_hits,
                         session_list_hits: &render_state.session_list_hits,
                         active_session_hits: &render_state.active_session_hits,
                         voice_input_hits: &render_state.voice_input_hits,
@@ -230,7 +234,7 @@ pub async fn run(
                     &mut server,
                     gui,
                     &mut render_state,
-                    &mut touch,
+                    touch,
                     &mut backlight,
                     &asr_tx,
                     asr_config,
@@ -242,11 +246,11 @@ pub async fn run(
                 if render_after_effect {
                     render_requested = true;
                 }
-                if state.route == app::Route::MainMenu {
-                    log::info!("new UI returning from remote to main menu");
-                    break;
+                if state.route == app::Route::Settings {
+                    touch.cancel_active_gesture();
+                    return crate::ui::setting_menu(gui, touch).await;
                 }
-                if state.route == app::Route::SessionPicker {
+                if matches!(state.route, app::Route::Clock | app::Route::MainMenu | app::Route::SessionPicker) {
                     last_session_list_change = tokio::time::Instant::now();
                     session_list_off_since = None;
                 }
@@ -254,8 +258,7 @@ pub async fn run(
             // MQTT 事件更新 AppState，screen frame 也从这里进入渲染。
             ev = server.recv() => {
                 let Some(ev) = ev else {
-                    log::warn!("MQTT event source closed, exiting new UI loop");
-                    break;
+                    return Err(anyhow::anyhow!("MQTT event source closed"));
                 };
                 if matches!(ev, MqttEvent::ActiveScreen(_) | MqttEvent::ActiveText(_))
                     && !server.has_active_session()
@@ -276,6 +279,7 @@ pub async fn run(
                 let result = state.handle_event(
                     app::AppEvent::Mqtt(ev),
                     &app::AppEventContext {
+                        main_menu_hits: &render_state.main_menu_hits,
                         session_list_hits: &render_state.session_list_hits,
                         active_session_hits: &render_state.active_session_hits,
                         voice_input_hits: &render_state.voice_input_hits,
@@ -288,7 +292,7 @@ pub async fn run(
                     &mut server,
                     gui,
                     &mut render_state,
-                    &mut touch,
+                    touch,
                     &mut backlight,
                     &asr_tx,
                     asr_config,
@@ -299,10 +303,6 @@ pub async fn run(
                 .await?;
                 if render_after_effect {
                     render_requested = true;
-                }
-                if state.route == app::Route::MainMenu {
-                    log::info!("new UI returning from remote to main menu");
-                    break;
                 }
                 if let Some(sync) = session_sync {
                     if sync.session_activity {
@@ -328,8 +328,6 @@ pub async fn run(
             }
         }
     }
-
-    Ok(())
 }
 
 async fn handle_app_event_result_(

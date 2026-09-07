@@ -130,10 +130,10 @@ impl WifiManager {
 pub async fn sync_time_with_ui(
     gui: &mut crate::ui::UI,
     touch: &mut crate::touch::TouchInput,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     loop {
         match sync_time(gui).await {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(true),
             Err(e) => {
                 warn!("SNTP sync failed after WiFi connect: {e:?}");
                 let items = vec![("Retry".to_string(), false), ("Skip".to_string(), false)];
@@ -141,7 +141,7 @@ pub async fn sync_time_with_ui(
                     crate::ui::select_menu_item(gui, touch, "Time sync failed", &items).await?;
                 if index == 1 {
                     warn!("SNTP sync skipped by user");
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
@@ -152,8 +152,8 @@ pub async fn sync_time_and_timezone_with_ui(
     gui: &mut crate::ui::UI,
     touch: &mut crate::touch::TouchInput,
     nvs: &mut esp_idf_svc::nvs::EspDefaultNvs,
-) -> anyhow::Result<()> {
-    match sync_timezone_from_ip(gui, nvs).await {
+) -> anyhow::Result<bool> {
+    let time_synced = match sync_timezone_from_ip(gui, nvs).await {
         Ok(result) => {
             info!(
                 "Timezone synced from IP: {} offset={}s ip={:?}",
@@ -168,7 +168,7 @@ pub async fn sync_time_and_timezone_with_ui(
                     .await
                     .ok();
                     tokio::time::sleep(TIME_SYNC_STATUS_HOLD).await;
-                    sync_time_with_ui(gui, touch).await?;
+                    sync_time_with_ui(gui, touch).await?
                 }
                 HttpDateSyncStatus::SkipSntp(diff) => {
                     gui.show_status(
@@ -178,13 +178,14 @@ pub async fn sync_time_and_timezone_with_ui(
                     .await
                     .ok();
                     tokio::time::sleep(TIME_SYNC_STATUS_HOLD).await;
+                    true
                 }
                 HttpDateSyncStatus::Unknown => {
                     gui.show_status("Sync time", "HTTP Date unavailable\nRunning SNTP...")
                         .await
                         .ok();
                     tokio::time::sleep(TIME_SYNC_STATUS_HOLD).await;
-                    sync_time_with_ui(gui, touch).await?;
+                    sync_time_with_ui(gui, touch).await?
                 }
             }
         }
@@ -194,10 +195,10 @@ pub async fn sync_time_and_timezone_with_ui(
                 .await
                 .ok();
             tokio::time::sleep(TIME_SYNC_STATUS_HOLD).await;
-            sync_time_with_ui(gui, touch).await?;
+            sync_time_with_ui(gui, touch).await?
         }
-    }
-    Ok(())
+    };
+    Ok(time_synced)
 }
 
 async fn sync_time(gui: &mut crate::ui::UI) -> anyhow::Result<()> {
