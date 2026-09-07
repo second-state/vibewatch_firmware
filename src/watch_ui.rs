@@ -234,10 +234,18 @@ pub enum AgentTuiAction {
     Next,
     Yolo,
     Del,
+    Esc,
 }
 
 impl AgentTuiAction {
-    pub const ALL: [Self; 5] = [Self::Speak, Self::Accept, Self::Next, Self::Yolo, Self::Del];
+    pub const ALL: [Self; 6] = [
+        Self::Speak,
+        Self::Accept,
+        Self::Next,
+        Self::Yolo,
+        Self::Del,
+        Self::Esc,
+    ];
 
     pub fn from_index(index: usize) -> Self {
         Self::ALL[index % Self::ALL.len()]
@@ -250,6 +258,7 @@ impl AgentTuiAction {
             Self::Next => "> Next",
             Self::Yolo => "* Yolo",
             Self::Del => "< Del",
+            Self::Esc => "x Esc",
         }
     }
 
@@ -259,6 +268,7 @@ impl AgentTuiAction {
             Self::Accept => Palette::GREEN,
             Self::Next => Palette::PURPLE,
             Self::Del => Palette::RED,
+            Self::Esc => Palette::RED,
         }
     }
 
@@ -268,6 +278,7 @@ impl AgentTuiAction {
             Self::Accept => rgb(0x1f, 0x2a, 0x15),
             Self::Next => rgb(0x22, 0x1f, 0x34),
             Self::Del => rgb(0x2b, 0x15, 0x17),
+            Self::Esc => rgb(0x2b, 0x15, 0x17),
         }
     }
 }

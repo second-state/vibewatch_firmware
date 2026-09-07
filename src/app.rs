@@ -693,6 +693,7 @@ impl AppState {
                     && crate::watch_ui::active_session_controls_trigger_hit_pair(start, end)
                 {
                     log::info!("new UI active session controls opened");
+                    self.active_session.action_index = 0;
                     self.active_session.controls_visible = true;
                     return AppEventResult::render();
                 }
@@ -750,6 +751,11 @@ impl AppState {
                             crate::watch_ui::AgentTuiAction::Del => {
                                 AppEventResult::effect(Effect::MqttPublish(MqttCommand::SendKey {
                                     key: "\x7f".to_string(),
+                                }))
+                            }
+                            crate::watch_ui::AgentTuiAction::Esc => {
+                                AppEventResult::effect(Effect::MqttPublish(MqttCommand::SendKey {
+                                    key: "\x1b".to_string(),
                                 }))
                             }
                         }
