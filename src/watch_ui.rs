@@ -1149,18 +1149,24 @@ where
         y += line_height;
     }
 
-    let button = Rectangle::new(
-        Point::new(s.sx(20), s.sy(270)),
-        Size::new(s.sw(224), s.sh(40)),
-    );
-    round_rect(target, button, s.sr(14), Palette::AMBER, None)?;
-    draw_label(
-        target,
-        data.button_label,
-        button.center() + Point::new(0, 5),
-        Palette::TEXT,
-        Alignment::Center,
-    )?;
+    // The bottom button is optional: an empty label renders no button at all.
+    let button = if data.button_label.is_empty() {
+        Rectangle::zero()
+    } else {
+        let rect = Rectangle::new(
+            Point::new(s.sx(20), s.sy(270)),
+            Size::new(s.sw(224), s.sh(40)),
+        );
+        round_rect(target, rect, s.sr(14), Palette::AMBER, None)?;
+        draw_label(
+            target,
+            data.button_label,
+            rect.center() + Point::new(0, 5),
+            Palette::TEXT,
+            Alignment::Center,
+        )?;
+        rect
+    };
 
     Ok(OtaPageHitRegions {
         back: top_left_scaled_hit_rect(64),

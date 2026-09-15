@@ -115,6 +115,7 @@ pub enum SettingAction {
     Ota,
     SyncTime,
     Ble,
+    Tailscale,
     Reboot,
     PowerOff,
 }
@@ -237,6 +238,15 @@ impl AppState {
         }
     }
 
+    /// Sets the active route and logs heap usage on every page transition.
+    fn enter_route(&mut self, route: Route) {
+        if self.route == route {
+            return;
+        }
+        self.route = route;
+        crate::util::log_heap_usage(&format!("route -> {route:?}"));
+    }
+
     pub fn sync_sessions(
         &mut self,
         title: String,
@@ -333,7 +343,7 @@ impl AppState {
         let changed = !self.sessions.reconnecting
             || self.route != Route::SessionPicker
             || !self.sessions.items.is_empty();
-        self.route = Route::SessionPicker;
+        self.enter_route(Route::SessionPicker);
         self.sessions.title.clear();
         self.sessions.items.clear();
         self.sessions.scroll_offset = 0;
@@ -347,7 +357,7 @@ impl AppState {
         if !self.sessions.reconnecting {
             return false;
         }
-        self.route = Route::SessionPicker;
+        self.enter_route(Route::SessionPicker);
         self.sessions.reconnecting = false;
         self.sessions.reconnect_dots = 0;
         self.active_session.loading = false;
@@ -355,7 +365,7 @@ impl AppState {
     }
 
     pub fn return_to_session_picker(&mut self) {
-        self.route = Route::SessionPicker;
+        self.enter_route(Route::SessionPicker);
         self.active_session.loading = false;
         self.active_session.backspace_overlay = false;
         self.active_session.menu_overlay = false;
@@ -371,14 +381,14 @@ impl AppState {
     }
 
     pub fn open_asr_editor(&mut self) {
-        self.route = Route::AsrEditor;
+        self.enter_route(Route::AsrEditor);
         self.asr.text.clear();
         self.asr.cursor = 0;
         self.asr.hint = "Hold Record";
     }
 
     pub fn return_from_asr_editor(&mut self) {
-        self.route = Route::ActiveSession;
+        self.enter_route(Route::ActiveSession);
         self.asr.hint = "Hold Record";
     }
 
@@ -544,7 +554,7 @@ impl AppState {
 
     fn handle_clock_touch(&mut self, gesture: TouchGesture) -> AppEventResult {
         if matches!(gesture, TouchGesture::Click { .. }) {
-            self.route = Route::MainMenu;
+            self.enter_route(Route::MainMenu);
             AppEventResult::render()
         } else {
             AppEventResult::none()
@@ -560,15 +570,15 @@ impl AppState {
             TouchGesture::Click { start, end } => match context.main_menu_hits.hit_pair(start, end)
             {
                 Some(crate::watch_ui::MainMenuHit::Back) => {
-                    self.route = Route::Clock;
+                    self.enter_route(Route::Clock);
                     AppEventResult::render()
                 }
                 Some(crate::watch_ui::MainMenuHit::Top) => {
-                    self.route = Route::SessionPicker;
+                    self.enter_route(Route::SessionPicker);
                     AppEventResult::render()
                 }
                 Some(crate::watch_ui::MainMenuHit::Bottom) => {
-                    self.route = Route::Settings;
+                    self.enter_route(Route::Settings);
                     self.settings.exit_action = None;
                     AppEventResult::render()
                 }
@@ -578,7 +588,7 @@ impl AppState {
                 direction: crate::touch::SwipeDirection::Right,
                 ..
             } => {
-                self.route = Route::Clock;
+                self.enter_route(Route::Clock);
                 AppEventResult::render()
             }
             _ => AppEventResult::none(),
@@ -594,7 +604,7 @@ impl AppState {
             TouchGesture::Press { .. } => AppEventResult::none(),
             TouchGesture::Click { start, end } => {
                 if context.session_list_hits.back_hit_pair(start, end) {
-                    self.route = Route::MainMenu;
+                    self.enter_route(Route::MainMenu);
                     return AppEventResult::none();
                 }
                 let press_index = context.session_list_hits.hit_index(start);
@@ -611,7 +621,7 @@ impl AppState {
 
                 let prefix = item.prefix.clone();
                 log::info!("new UI session selected: {prefix}");
-                self.route = Route::ActiveSession;
+                self.enter_route(Route::ActiveSession);
                 self.active_session.loading = true;
                 self.active_session.controls_visible = false;
                 self.active_session.action_index = 0;
@@ -636,7 +646,7 @@ impl AppState {
             } => match direction {
                 crate::touch::SwipeDirection::Right => {
                     log::info!("new UI session list right swipe detected, going back to main menu");
-                    self.route = Route::MainMenu;
+                    self.enter_route(Route::MainMenu);
                     AppEventResult::none()
                 }
                 crate::touch::SwipeDirection::Up | crate::touch::SwipeDirection::Down => {
@@ -676,7 +686,7 @@ impl AppState {
             TouchGesture::Press { .. } => AppEventResult::none(),
             TouchGesture::Click { start, end } => {
                 if context.settings_hits.back_hit_pair(start, end) {
-                    self.route = Route::MainMenu;
+                    self.enter_route(Route::MainMenu);
                     return AppEventResult::none();
                 }
                 let press_index = context.settings_hits.hit_index(start);
@@ -689,8 +699,9 @@ impl AppState {
                     0 => SettingAction::Ota,
                     1 => SettingAction::SyncTime,
                     2 => SettingAction::Ble,
-                    3 => SettingAction::Reboot,
-                    4 => SettingAction::PowerOff,
+                    3 => SettingAction::Tailscale,
+                    4 => SettingAction::Reboot,
+                    5 => SettingAction::PowerOff,
                     _ => return AppEventResult::none(),
                 };
                 log::info!("new UI settings action selected: {action:?}");
@@ -704,7 +715,7 @@ impl AppState {
                 direction: crate::touch::SwipeDirection::Right,
                 ..
             } => {
-                self.route = Route::MainMenu;
+                self.enter_route(Route::MainMenu);
                 AppEventResult::none()
             }
             TouchGesture::Swipe { .. } => AppEventResult::none(),
@@ -735,7 +746,7 @@ impl AppState {
                 match context.active_session_hits.hit_pair(start, end) {
                     Some(crate::watch_ui::ActiveSessionHit::Back) => {
                         log::info!("new UI active session back click");
-                        self.route = Route::SessionPicker;
+                        self.enter_route(Route::SessionPicker);
                         self.active_session.backspace_overlay = false;
                         self.active_session.menu_overlay = false;
                         self.active_session.loading = false;
@@ -889,7 +900,7 @@ impl AppState {
                 match context.active_session_hits.swipe(start, end) {
                     Some(crate::watch_ui::ActiveSessionSwipe::Back) => {
                         log::info!("new UI right swipe detected, returning to session list");
-                        self.route = Route::SessionPicker;
+                        self.enter_route(Route::SessionPicker);
                         self.active_session.loading = false;
                         AppEventResult {
                             render: true,
@@ -1027,7 +1038,7 @@ impl AppState {
                 if self.route == Route::AsrEditor {
                     return AppEventResult::none();
                 }
-                self.route = Route::ActiveSession;
+                self.enter_route(Route::ActiveSession);
                 self.active_session.loading = false;
                 self.active_session.pending_screen_chunk = Some(chunk);
                 AppEventResult::render()
@@ -1039,7 +1050,7 @@ impl AppState {
                 if self.route == Route::AsrEditor {
                     return AppEventResult::none();
                 }
-                self.route = Route::ActiveSession;
+                self.enter_route(Route::ActiveSession);
                 self.active_session.loading = false;
                 self.active_session.pending_text_frame = Some(frame);
                 AppEventResult::render()
@@ -1070,7 +1081,7 @@ impl AppState {
                 );
                 if !online && was_active {
                     log::warn!("new UI active session offline; returning to session list");
-                    self.route = Route::SessionPicker;
+                    self.enter_route(Route::SessionPicker);
                     self.active_session.loading = false;
                     return AppEventResult::render_with_effect(Effect::SetBacklight(
                         BacklightState::Normal,
@@ -1106,7 +1117,7 @@ impl AppState {
             UiEvent::PowerOffRequested => AppEventResult::effect(Effect::PowerOff),
             UiEvent::RebootRequested => AppEventResult::effect(Effect::Reboot),
             UiEvent::SessionClicked(prefix) => {
-                self.route = Route::ActiveSession;
+                self.enter_route(Route::ActiveSession);
                 self.active_session.loading = true;
                 self.active_session.controls_visible = false;
                 self.active_session.action_index = 0;

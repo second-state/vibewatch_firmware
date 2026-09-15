@@ -35,6 +35,7 @@ pub async fn run(
     touch: &mut crate::touch::TouchInput,
     nvs: &mut esp_idf_svc::nvs::EspDefaultNvs,
 ) -> anyhow::Result<()> {
+    crate::util::log_heap_usage("page -> ota");
     gui.show_status("OTA Mode", "Connecting WiFi...").await.ok();
 
     if let Err(e) = wifi.connect(&setting.wifi_list) {
@@ -57,7 +58,7 @@ pub async fn run(
     let (attempt_tx, attempt_rx) = std::sync::mpsc::channel::<()>();
     let _ota_worker = std::thread::Builder::new()
         .name("ota-worker".to_string())
-        .stack_size(1024 * 24)
+        .stack_size(1024 * 16)
         .spawn(move || {
             while let Ok(ev) = rx.recv() {
                 let result = match ev {

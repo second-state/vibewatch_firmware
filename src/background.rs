@@ -17,6 +17,7 @@ pub fn validate_gif(data: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)] // disabled in main while profiling the tailscale experiment
 pub fn load_from_nvs(nvs: &esp_idf_svc::nvs::EspDefaultNvs) -> Option<&'static [u8]> {
     let len = nvs.blob_len(BACKGROUND_GIF_KEY).ok()??;
     if len == 0 {

@@ -14,6 +14,10 @@ mod power;
 mod protocol;
 mod remote;
 mod setting;
+mod tailscale;
+// Heap trace debug tool (unlinked). To use: uncomment this, the call sites
+// marked "heap_trace", and the sdkconfig lines — see src/heap_trace.rs.
+// mod heap_trace;
 mod touch;
 mod ui;
 mod util;
@@ -22,6 +26,7 @@ mod watch_ui;
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
+    util::log_heap_usage("startup: begin");
     power::init_cpu_frequency_scaling()?;
 
     let peripherals = esp_idf_svc::hal::peripherals::Peripherals::take().unwrap();
@@ -49,6 +54,7 @@ fn main() -> anyhow::Result<()> {
     lcd::set_backlight(50)?;
     power::init()?;
     power::start_power_key_worker();
+    util::log_heap_usage("startup: lcd/touch/power ready");
     // ===
 
     // === Audio: Waveshare BSP I2S + ES8311 speaker + ES7210 microphone ===
@@ -66,18 +72,25 @@ fn main() -> anyhow::Result<()> {
             player.play_async();
         }
     }
+    util::log_heap_usage("startup: audio ready");
     // ===
 
-    let background_gif = background::load_from_nvs(&nvs);
-    if let Some(background_gif) = background_gif {
-        runtime.block_on(ui::ui_background(background_gif)).ok();
-    }
+    // Trace every allocation that stays alive during display/gui setup. (heap_trace)
+    // util::heap_trace_window_start(1024);
+    // XXX(tailscale-experiment): background GIF disabled to reclaim
+    // ~32 KB internal (gif canvas) + 64 KB PSRAM (raw data) while profiling.
+    // let background_gif = background::load_from_nvs(&nvs);
+    // if let Some(background_gif) = background_gif {
+    //     runtime.block_on(ui::ui_background(background_gif)).ok();
+    // }
     let mut gui = ui::UI::default();
-    if let Some(background_gif) = background_gif {
-        if let Err(e) = gui.set_status_background_gif(background_gif) {
-            log::error!("Failed to apply custom background GIF: {e:?}");
-        }
-    }
+    // if let Some(background_gif) = background_gif {
+    //     if let Err(e) = gui.set_status_background_gif(background_gif) {
+    //         log::error!("Failed to apply custom background GIF: {e:?}");
+    //     }
+    // }
+    util::log_heap_usage("startup: display/gui ready");
+    // util::heap_trace_window_stop(); (heap_trace)
 
     // A/B 双槽 OTA:标记当前启动槽为有效(确认本次正常启动;配合回滚机制)。
     {
@@ -99,6 +112,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut wifi = network::WifiManager::new(peripherals.modem, sysloop)?;
+    util::log_heap_usage("startup: wifi manager ready");
     // Volatile by design: after a reboot, the clock must be verified/synced again.
     let mut time_synced = false;
     // Set after leaving the OTA page via back/right swipe so the next remote
@@ -133,6 +147,11 @@ fn main() -> anyhow::Result<()> {
                                         {
                                             time_synced = true;
                                         }
+                                    }
+                                    ui::SettingMenuSelection::Tailscale => {
+                                        runtime.block_on(tailscale::run(
+                                            &mut wifi, &setting, &mut gui, &mut touch,
+                                        ))?;
                                     }
                                     ui::SettingMenuSelection::Ble => {
                                         runtime
@@ -238,6 +257,12 @@ fn main() -> anyhow::Result<()> {
             Ok(selection) => {
                 wifi.disconnect_and_stop();
                 match selection {
+                    ui::SettingMenuSelection::Tailscale => {
+                        runtime
+                            .block_on(tailscale::run(&mut wifi, &setting, &mut gui, &mut touch))?;
+                        // Back from the Tailscale page: reopen the settings page.
+                        reenter_remote_settings = true;
+                    }
                     ui::SettingMenuSelection::Ota => {
                         runtime.block_on(ota::run(
                             &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,

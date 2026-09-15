@@ -325,6 +325,7 @@ fn rgb565_be(color: ColorFormat) -> [u8; 2] {
     RawU16::from(color).into_inner().to_be_bytes()
 }
 
+#[allow(dead_code)] // disabled in main while profiling the tailscale experiment
 pub async fn ui_background(gif_data: &[u8]) -> anyhow::Result<()> {
     let image = tinygif::Gif::<ColorFormat>::from_slice(gif_data)
         .map_err(|e| anyhow::anyhow!("invalid UI background GIF: {e:?}"))?;
@@ -622,6 +623,7 @@ pub enum SettingMenuSelection {
     Ota,
     SyncTime,
     Ble,
+    Tailscale,
     Reboot,
     PowerOff,
     Back,
@@ -658,6 +660,8 @@ pub async fn clock_screen(
     touch: &mut crate::touch::TouchInput,
     boot_button: &mut crate::boot::BootButton,
 ) -> anyhow::Result<()> {
+    crate::util::log_heap_usage("page -> clock");
+    // crate::util::heap_trace_window_start(1024); (heap_trace)
     set_clock_screen_on(true)?;
     gui.show_clock().await?;
     let mut next_tick = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
@@ -724,6 +728,8 @@ pub async fn main_menu(
     gui: &mut UI,
     touch: &mut crate::touch::TouchInput,
 ) -> anyhow::Result<MainMenuSelection> {
+    // crate::util::heap_trace_window_stop_once(); (heap_trace)
+    crate::util::log_heap_usage("page -> main menu");
     let mut title = main_menu_title();
     let mut hit_regions = gui.display_main_menu().await?;
     log::info!("{title}: waiting for touch selection");
@@ -802,6 +808,7 @@ pub async fn setting_menu(
     gui: &mut UI,
     touch: &mut crate::touch::TouchInput,
 ) -> anyhow::Result<SettingMenuSelection> {
+    crate::util::log_heap_usage("page -> settings (home loop)");
     let mut hits = gui.display_settings_list().await?;
     log::info!("settings: waiting for touch selection");
     loop {
@@ -818,8 +825,9 @@ pub async fn setting_menu(
                         0 => SettingMenuSelection::Ota,
                         1 => SettingMenuSelection::SyncTime,
                         2 => SettingMenuSelection::Ble,
-                        3 => SettingMenuSelection::Reboot,
-                        4 => SettingMenuSelection::PowerOff,
+                        3 => SettingMenuSelection::Tailscale,
+                        4 => SettingMenuSelection::Reboot,
+                        5 => SettingMenuSelection::PowerOff,
                         _ => {
                             hits = gui.display_settings_list().await?;
                             continue;
@@ -1004,6 +1012,7 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u64, u64) {
 }
 
 impl UI {
+    #[allow(dead_code)] // disabled in main while profiling the tailscale experiment
     pub fn set_status_background_gif(&mut self, data: &'static [u8]) -> anyhow::Result<()> {
         let image = tinygif::Gif::<ColorFormat>::from_slice(data)
             .map_err(|e| anyhow::anyhow!("invalid status background GIF: {e:?}"))?;
@@ -1796,6 +1805,7 @@ impl UI {
             "OTA Update",
             "Sync Time",
             "Enable BLE",
+            "Tailscale",
             "Reboot",
             "Power Off",
         ];

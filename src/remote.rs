@@ -77,6 +77,7 @@ pub async fn run(
         }
     };
     log::info!("MQTT connected, entering new UI session list");
+    crate::util::log_heap_usage("startup: mqtt connected");
 
     let mut state = app::AppState::session_picker();
     if start_in_settings {
@@ -267,6 +268,9 @@ pub async fn run(
                         app::SettingAction::Ota => crate::ui::SettingMenuSelection::Ota,
                         app::SettingAction::SyncTime => crate::ui::SettingMenuSelection::SyncTime,
                         app::SettingAction::Ble => crate::ui::SettingMenuSelection::Ble,
+                        app::SettingAction::Tailscale => {
+                            crate::ui::SettingMenuSelection::Tailscale
+                        }
                         app::SettingAction::Reboot => crate::ui::SettingMenuSelection::Reboot,
                         app::SettingAction::PowerOff => crate::ui::SettingMenuSelection::PowerOff,
                     });
