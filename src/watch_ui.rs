@@ -539,22 +539,8 @@ where
     let s = Scale::new(frame);
     let center_x = frame.center().x;
 
-    draw_meta(
-        target,
-        "WATCH",
-        Point::new(s.sx(24), s.sy(28)),
-        Palette::DIM,
-        Alignment::Left,
-    )?;
     if let Some(percent) = data.battery {
-        let color = battery_color(percent);
-        draw_meta(
-            target,
-            &format!("* {percent}%"),
-            Point::new(s.sx(240), s.sy(28)),
-            color,
-            Alignment::Right,
-        )?;
+        draw_battery(target, s, percent, Point::new(s.sx(240), s.sy(28)))?;
     }
 
     let center = Point::new(center_x, s.sy(116));
@@ -721,13 +707,7 @@ where
         Alignment::Left,
     )?;
     if let Some(percent) = data.battery {
-        draw_meta(
-            target,
-            &format!("* {percent}%"),
-            Point::new(s.sx(244), s.sy(35)),
-            battery_color(percent),
-            Alignment::Right,
-        )?;
+        draw_battery(target, s, percent, Point::new(s.sx(244), s.sy(35)))?;
     }
 
     let row_x = s.sx(20);
@@ -865,13 +845,7 @@ where
         Alignment::Left,
     )?;
     if let Some(percent) = data.battery {
-        draw_meta(
-            target,
-            &format!("* {percent}%"),
-            Point::new(s.sx(244), s.sy(35)),
-            battery_color(percent),
-            Alignment::Right,
-        )?;
+        draw_battery(target, s, percent, Point::new(s.sx(244), s.sy(35)))?;
     }
 
     let row_x = s.sx(20);
@@ -1267,7 +1241,16 @@ where
         Icon::Left => draw_triangle(target, center, crate::touch::SwipeDirection::Left, color),
         Icon::Right => draw_triangle(target, center, crate::touch::SwipeDirection::Right, color),
         Icon::Submit => draw_check(target, center, color),
-        Icon::Agent | Icon::Settings => {
+        // ✦ from the mockup; unifont_t_78_79 carries the four-pointed star.
+        Icon::Agent => Text::with_alignment(
+            "✦",
+            center + Point::new(0, 6),
+            U8g2TextStyle::new(u8g2_fonts::fonts::u8g2_font_unifont_t_78_79, color),
+            Alignment::Center,
+        )
+        .draw(target)
+        .map(|_| ()),
+        Icon::Settings => {
             Circle::with_center(center, s.sr(6))
                 .into_styled(PrimitiveStyle::with_fill(color))
                 .draw(target)?;
@@ -1356,6 +1339,32 @@ where
     Text::with_alignment(text, point, text_style(color), alignment)
         .draw(target)
         .map(|_| ())
+}
+
+/// Battery indicator: colored dot + percentage, right-aligned at `right`.
+/// The dot replaces the old `*` prefix glyph (matches the mockup's ●).
+fn draw_battery<D>(target: &mut D, s: Scale, percent: u8, right: Point) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Color>,
+{
+    let color = battery_color(percent);
+    let text = format!("{percent}%");
+    let text_w = embedded_graphics::text::renderer::TextRenderer::measure_string(
+        &meta_style(color),
+        &text,
+        Point::zero(),
+        embedded_graphics::text::Baseline::Top,
+    )
+    .bounding_box
+    .size
+    .width as i32;
+    let dot_d = s.sr(10).max(8);
+    let gap = s.sw(6).max(4) as i32;
+    let dot_center = Point::new(right.x - text_w - gap - (dot_d as i32) / 2, right.y - 4);
+    Circle::with_center(dot_center, dot_d)
+        .into_styled(PrimitiveStyle::with_fill(color))
+        .draw(target)?;
+    draw_meta(target, &text, right, color, Alignment::Right)
 }
 
 fn draw_meta<D>(

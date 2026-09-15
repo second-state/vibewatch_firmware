@@ -1727,7 +1727,7 @@ impl UI {
         let hit_regions = crate::watch_ui::render_main_menu(
             self.display.as_mut(),
             &crate::watch_ui::MenuTile {
-                label: "Remote",
+                label: "My Agents",
                 icon: crate::watch_ui::Icon::Agent,
                 accent: crate::watch_ui::Palette::AMBER,
             },
