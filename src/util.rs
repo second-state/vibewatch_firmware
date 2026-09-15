@@ -45,3 +45,24 @@ pub fn create_unlimited_wav_header(config: &WavConfig) -> Vec<u8> {
 
     wav_data
 }
+
+/// Logs current free heap (total / internal / PSRAM) with a context tag.
+pub fn log_heap_usage(tag: &str) {
+    use esp_idf_svc::sys;
+    // SAFETY: plain ESP-IDF heap queries.
+    let (free, min, internal, psram) = unsafe {
+        (
+            sys::esp_get_free_heap_size(),
+            sys::esp_get_minimum_free_heap_size(),
+            sys::heap_caps_get_free_size(sys::MALLOC_CAP_INTERNAL),
+            sys::heap_caps_get_free_size(sys::MALLOC_CAP_SPIRAM),
+        )
+    };
+    log::info!(
+        "[heap] {tag}: free {} KB, min {} KB, internal {} KB, psram {} KB",
+        free / 1024,
+        min / 1024,
+        internal / 1024,
+        psram / 1024
+    );
+}
