@@ -58,7 +58,7 @@ dependencies:
       type: service
     version: 1.2.1
   espressif/esp_lcd_touch_ft5x06:
-    component_hash: 8ae101b4a321b6327d98751b049e3c7fff2718ad04d676259369ff85d4edbcdf
+    component_hash: d49f3dec3ae89617c31d96ac6f31bbc3212a0f049354eabd55c9457e454c56ae
     dependencies:
     - name: espressif/esp_lcd_touch
       registry_url: https://components.espressif.com
@@ -70,9 +70,9 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 1.1.0~1
+    version: 1.1.1
   espressif/esp_lvgl_port:
-    component_hash: fb6c1fdfe70d4ca39a035d63ca394a35f17ec84ce16ff98ecb13a54155d75da4
+    component_hash: d3c020b45c3dfc0d1706a83b63a1c34a6eb444a6e935f9afff79f92b7b94dcef
     dependencies:
     - name: idf
       require: private
@@ -84,7 +84,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 2.8.0~1
+    version: 2.9.0
   espressif/esp_new_jpeg:
     component_hash: e1e7e6991193c41ed6c9fc386702aa7821433319e7aa9c3147cd3236310cd69c
     dependencies: []
@@ -115,6 +115,14 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 9.5.0
+  microlink:
+    component_hash: ec1e688ed196c70588e1a8ce072f0aa6205f6c794af7ab92f39bcbed795a51ab
+    dependencies: []
+    source:
+      git: https://github.com/L-jasmine/microlink
+      path: components/microlink
+      type: git
+    version: f3d896d040290335de9f5ac606165fd6a104cc33
   waveshare/esp32_s3_touch_amoled_2_06:
     component_hash: a68c5c26aabb00634f46834116a62413f75f34d672a8b3c639b8f8253160ec68
     dependencies:
@@ -171,9 +179,19 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 2.0.0
+  wireguard_lwip:
+    component_hash: 60b2f3335e06c3c2173db1860cd57fd98af532783e2f33b00caed069a85f3f60
+    dependencies: []
+    source:
+      git: https://github.com/L-jasmine/microlink
+      path: components/microlink/components/wireguard_lwip
+      type: git
+    version: f3d896d040290335de9f5ac606165fd6a104cc33
 direct_dependencies:
 - espressif/esp_new_jpeg
+- microlink
 - waveshare/esp32_s3_touch_amoled_2_06
-manifest_hash: 8eac0054e1db526c9f45f61f423242df511204796fc65508311452080bcc2837
+- wireguard_lwip
+manifest_hash: 013d1711490a6b7464a2bec57a445d41dd3b2b82f692a03662d66b4861f6a8de
 target: esp32s3
 version: 2.0.0
