@@ -52,8 +52,7 @@ int board_display_init(void)
     }
 
     const bsp_display_config_t config = {
-        //.max_transfer_sz = BSP_LCD_H_RES * BSP_LCD_V_RES * BSP_LCD_BITS_PER_PIXEL / 8,
-        .max_transfer_sz = 1024*8,
+        .max_transfer_sz = BSP_LCD_H_RES * BSP_LCD_V_RES * BSP_LCD_BITS_PER_PIXEL / 8,
     };
 
     esp_err_t err = bsp_display_new(&config, &panel_handle, &panel_io_handle);

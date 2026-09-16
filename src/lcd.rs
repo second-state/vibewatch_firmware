@@ -259,6 +259,7 @@ pub async fn async_flush_display(
             if e == 0 {
                 if !wait_color_transfer_done_or_timeout().await {
                     log::warn!("flush_display transfer wait timeout after successful submit");
+                    crate::util::log_heap_usage("startup: begin");
                     continue;
                 }
                 last_error = 0;
