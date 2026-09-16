@@ -23,6 +23,32 @@ mod ui;
 mod util;
 mod watch_ui;
 
+/// C entry for the PSRAM-stacked ASR worker (see util::PsramTask).
+/// Owns the channel receiver for the worker's whole lifetime.
+unsafe extern "C" fn asr_worker_entry(arg: *mut core::ffi::c_void) {
+    let asr_rx = Box::from_raw(arg as *mut std::sync::mpsc::Receiver<audio::AsrRequest>);
+    let mut driver = audio::Driver::new()
+        .map_err(|e| log::error!("Failed to create audio driver: {e:?}"))
+        .ok();
+    while let Ok(req) = asr_rx.recv() {
+        let mut listening = Some(req.listening);
+        let result = match driver.as_mut() {
+            Some(driver) => driver.start_asr(
+                &req.config,
+                || {
+                    if let Some(tx) = listening.take() {
+                        let _ = tx.send(());
+                    }
+                },
+                || req.cancel.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            None => Err(anyhow::anyhow!("audio driver unavailable")),
+        };
+        let _ = req.respond.send(result);
+    }
+    log::info!("ASR worker thread exited");
+}
+
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
@@ -119,6 +145,26 @@ fn main() -> anyhow::Result<()> {
     // session reopens directly on the settings page.
     let mut reenter_remote_settings = false;
 
+    // ASR worker: created ONCE, with its 16 KB stack allocated from PSRAM
+    // (util::PsramTask) instead of scarce internal RAM. It serves every
+    // remote session through the long-lived channel below; re-spawning per
+    // iteration would leak the old worker (it never exits: the channel
+    // never closes).
+    const ASR_TASK_NO_AFFINITY: i32 = i32::MAX; // FreeRTOS tskNO_AFFINITY
+    let (asr_tx, asr_rx) = std::sync::mpsc::channel::<audio::AsrRequest>();
+    let _asr_task: Option<util::PsramTask> = unsafe {
+        util::PsramTask::spawn(
+            &std::ffi::CString::new("asr-worker").unwrap(),
+            Some(asr_worker_entry),
+            Box::into_raw(Box::new(asr_rx)).cast(),
+            1024 * 16,
+            5,
+            ASR_TASK_NO_AFFINITY,
+        )
+    }
+    .map_err(|e| log::error!("Failed to spawn ASR worker thread: {e:?}"))
+    .ok();
+
     loop {
         let skip_home = reenter_remote_settings;
         reenter_remote_settings = false;
@@ -211,35 +257,7 @@ fn main() -> anyhow::Result<()> {
             .ok();
 
         let client_id = wifi_sta_mac_client_id();
-        let (asr_tx, asr_rx) = std::sync::mpsc::channel::<audio::AsrRequest>();
-        if let Err(e) = std::thread::Builder::new()
-            .name("asr-worker".to_string())
-            .stack_size(1024 * 16)
-            .spawn(move || {
-                let mut driver = audio::Driver::new()
-                    .map_err(|e| log::error!("Failed to create audio driver: {e:?}"))
-                    .ok();
-                while let Ok(req) = asr_rx.recv() {
-                    let mut listening = Some(req.listening);
-                    let result = match driver.as_mut() {
-                        Some(driver) => driver.start_asr(
-                            &req.config,
-                            || {
-                                if let Some(tx) = listening.take() {
-                                    let _ = tx.send(());
-                                }
-                            },
-                            || req.cancel.load(std::sync::atomic::Ordering::Relaxed),
-                        ),
-                        None => Err(anyhow::anyhow!("audio driver unavailable")),
-                    };
-                    let _ = req.respond.send(result);
-                }
-                log::info!("ASR worker thread exited");
-            })
-        {
-            log::error!("Failed to spawn ASR worker thread: {e:?}");
-        }
+        let asr_tx = asr_tx.clone();
 
         match runtime.block_on(remote::run(
             setting.server_url.clone(),
