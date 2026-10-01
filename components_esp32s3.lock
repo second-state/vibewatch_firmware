@@ -109,20 +109,44 @@ dependencies:
       type: idf
     version: 5.4.4
   lvgl/lvgl:
-    component_hash: 184e532558c1c45fefed631f3e235423d22582aafb4630f3e8885c35281a49ae
-    dependencies: []
+    component_hash: 7d82410747bbfb319531449749e940f440f8414f041f9eaba13f0d1dd7f58cdd
+    dependencies:
+    - name: espressif/freetype
+      registry_url: https://components.espressif.com
+      require: private
+      rules:
+      - if: idf_version >=5.5 && $CONFIG{LV_USE_FREETYPE} == True
+      version: ^2.14.3
+    - name: espressif/libjpeg-turbo
+      registry_url: https://components.espressif.com
+      require: private
+      rules:
+      - if: idf_version >=5.5 && $CONFIG{LV_USE_LIBJPEG_TURBO} == True
+      version: ^3.1.1
+    - name: espressif/libpng
+      registry_url: https://components.espressif.com
+      require: private
+      rules:
+      - if: idf_version >=5.5 && $CONFIG{LV_USE_LIBPNG} == True
+      version: ^1.6.58
+    - name: espressif/lz4
+      registry_url: https://components.espressif.com
+      require: private
+      rules:
+      - if: idf_version >=5.5 && $CONFIG{LV_USE_LZ4} == True && $CONFIG{LV_USE_LZ4_INTERNAL} == False
+      version: ^1.10.0
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 9.5.0
+    version: 9.6.0~1
   microlink:
-    component_hash: ec1e688ed196c70588e1a8ce072f0aa6205f6c794af7ab92f39bcbed795a51ab
+    component_hash: 6fb15803405849518a164787bdf0831aced72fda685cf66f3ad521f9fd4a2707
     dependencies: []
     source:
       git: https://github.com/L-jasmine/microlink
       path: components/microlink
       type: git
-    version: f3d896d040290335de9f5ac606165fd6a104cc33
+    version: cbc603728f71dff9d9beb28eb515f876503ebd4b
   waveshare/esp32_s3_touch_amoled_2_06:
     component_hash: a68c5c26aabb00634f46834116a62413f75f34d672a8b3c639b8f8253160ec68
     dependencies:
@@ -180,13 +204,13 @@ dependencies:
       type: service
     version: 2.0.0
   wireguard_lwip:
-    component_hash: 60b2f3335e06c3c2173db1860cd57fd98af532783e2f33b00caed069a85f3f60
+    component_hash: eab700cc84222f8aa9bc36dd510304e014d431d037225ec57aa63b7401ca6210
     dependencies: []
     source:
       git: https://github.com/L-jasmine/microlink
       path: components/microlink/components/wireguard_lwip
       type: git
-    version: f3d896d040290335de9f5ac606165fd6a104cc33
+    version: cbc603728f71dff9d9beb28eb515f876503ebd4b
 direct_dependencies:
 - espressif/esp_new_jpeg
 - microlink

@@ -183,7 +183,9 @@ impl MqttServer {
             out_buffer_size: 8 * 1024,
             keep_alive_interval: Some(Duration::from_secs(20)),
             reconnect_timeout: Some(Duration::from_secs(10)),
-            network_timeout: Duration::from_secs(30),
+            // DERP 中继路径 RTT 秒级,TCP+TLS 建链需要更长时间;
+            // 30s 会在中继路径上几乎必然超时(ECONNABORTED 循环)
+            network_timeout: Duration::from_secs(90),
             ..Default::default()
         };
         if use_tls {
@@ -219,11 +221,13 @@ impl MqttServer {
         })
         .map_err(|e| anyhow::anyhow!("EspMqttClient::new_cb failed: {e:?}"))?;
 
-        // 等首个 Connected(超时 30s,保留「broker 连不上快速失败」的反馈;连不上 app 会重启)。
+        // 等首个 Connected(超时 90s):tailscale 模式下要先拉起 microlink、
+        // 连 DERP、建 WG 会话(经中继),整个链路可能超过 30 秒;
+        // 连不上 app 会重启。
         let connected =
-            tokio::time::timeout(Duration::from_secs(30), wait_first_connected(&mut rx)).await;
+            tokio::time::timeout(Duration::from_secs(90), wait_first_connected(&mut rx)).await;
         if connected.is_err() {
-            return Err(anyhow::anyhow!("MQTT connect timeout (30s)"));
+            return Err(anyhow::anyhow!("MQTT connect timeout (90s)"));
         }
 
         // Discovery:订阅 `{user}/+/+/vibetty`(user = username,匿名时回退 `root`)。

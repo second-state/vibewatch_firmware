@@ -4,45 +4,12 @@
 
 use esp_idf_svc::sys::microlink as ml;
 
-/// Tailscale auth key (tskey-auth-...). Required on the very first
-/// registration; afterwards the generated node keys are cached in NVS and
-/// the key can stay empty.
-const TAILSCALE_AUTH_KEY: &str = "tskey-auth-kEvxLfsx6m11CNTRL-dymYKWyjzoHyLMREH2pMpHE2dWGHTm1AV";
-const DEVICE_NAME: &str = "vibewatch";
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-const STATE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Peer probed with an HTTP GET once per second while the page is open.
 const PROBE_IP: &str = "100.107.32.114";
 const PROBE_PORT: u16 = 9090;
 const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Stops and frees the microlink instance whenever the page exits.
-struct MicrolinkGuard(*mut ml::microlink_s);
-
-impl Drop for MicrolinkGuard {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: handle came from microlink_init and is valid until stop.
-            unsafe {
-                ml::microlink_stop(self.0);
-                ml::microlink_destroy(self.0);
-            }
-        }
-    }
-}
-
-fn state_label(state: ml::microlink_state_t) -> &'static str {
-    match state {
-        ml::microlink_state_t_ML_STATE_IDLE => "Idle",
-        ml::microlink_state_t_ML_STATE_WIFI_WAIT => "Waiting for WiFi",
-        ml::microlink_state_t_ML_STATE_CONNECTING => "Connecting",
-        ml::microlink_state_t_ML_STATE_REGISTERING => "Registering",
-        ml::microlink_state_t_ML_STATE_CONNECTED => "Connected",
-        ml::microlink_state_t_ML_STATE_RECONNECTING => "Reconnecting",
-        _ => "Error",
-    }
-}
 
 pub async fn run(
     wifi: &mut crate::network::WifiManager,
@@ -63,66 +30,19 @@ pub async fn run(
         return Ok(());
     }
 
-    let auth_key = std::ffi::CString::new(TAILSCALE_AUTH_KEY).unwrap();
-    let device_name = std::ffi::CString::new(DEVICE_NAME).unwrap();
-    let config = ml::microlink_config_t {
-        auth_key: auth_key.as_ptr(),
-        device_name: device_name.as_ptr(),
-        enable_derp: true,
-        enable_stun: true,
-        enable_disco: true,
-        max_peers: 8,
-        wifi_tx_power_dbm: 0,
-        priority_peer_ip: 0,
-        disco_heartbeat_ms: 0,
-        stun_interval_ms: 0,
-        ctrl_watchdog_ms: 0,
-    };
-    // SAFETY: config outlives the call (copied internally by microlink_init).
-    let handle = MicrolinkGuard(unsafe { ml::microlink_init(&config) });
-    if handle.0.is_null() {
-        gui.show_status("Tailscale", "Init failed").await.ok();
-        std::thread::sleep(std::time::Duration::from_secs(2));
+    let Some(handle) = crate::microlink::start_and_wait(
+        crate::microlink::TAILSCALE_AUTH_KEY,
+        crate::microlink::DEVICE_NAME,
+        "Tailscale",
+        CONNECT_TIMEOUT,
+        gui,
+    )
+    .await
+    else {
         return Ok(());
-    }
-
-    // SAFETY: valid handle from microlink_init; WiFi is connected.
-    if unsafe { ml::microlink_start(handle.0) } != esp_idf_svc::sys::ESP_OK {
-        gui.show_status("Tailscale", "Start failed").await.ok();
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        return Ok(());
-    }
-
-    // Wait for registration, showing live state in the notice screen.
-    let started = std::time::Instant::now();
-    let mut last_label = String::new();
-    let connected = loop {
-        let state = unsafe { ml::microlink_get_state(handle.0) };
-        match state {
-            ml::microlink_state_t_ML_STATE_CONNECTED => break true,
-            ml::microlink_state_t_ML_STATE_ERROR => break false,
-            _ => {}
-        }
-        if started.elapsed() > CONNECT_TIMEOUT {
-            break false;
-        }
-        let label = state_label(state);
-        if label != last_label {
-            gui.show_status("Tailscale", format!("Connecting...\n{label}"))
-                .await
-                .ok();
-            last_label = label.to_string();
-        }
-        std::thread::sleep(STATE_POLL_INTERVAL);
     };
 
-    if !connected {
-        gui.show_status("Tailscale", "Connection failed").await.ok();
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        return Ok(());
-    }
-
-    let (vpn_ip_str, count, peers) = collect_tailnet_info(handle.0);
+    let (vpn_ip_str, count, peers) = collect_tailnet_info(&handle);
     let count_text = count_line(count);
     let lines = build_lines(&vpn_ip_str, &count_text, &peers);
     let mut hits = gui.display_ota_page("Tailscale", &lines, "").await?;
@@ -144,10 +64,7 @@ pub async fn run(
     // Kick the WG handshake toward the probe target. Our traffic path is
     // tokio TCP, which unlike microlink_tcp_connect does not trigger the
     // handshake itself — and microlink's peers are passive by default.
-    // SAFETY: valid handle from microlink_init.
-    unsafe {
-        ml::microlink_trigger_handshake(handle.0, probe_target_ip);
-    }
+    handle.trigger_handshake(PROBE_IP);
 
     // Probe loop: one HTTP GET per second to the peer over the tunnel,
     // interleaved with touch handling (back/right swipe exits the page).
@@ -164,13 +81,10 @@ pub async fn run(
                 if !ok {
                     // Tunnel still down (e.g. DERP reconnect in flight after
                     // the rehome) — re-kick the WG handshake each attempt.
-                    // SAFETY: valid handle from microlink_init.
-                    unsafe {
-                        ml::microlink_trigger_handshake(handle.0, probe_target_ip);
-                    }
+                    handle.trigger_handshake(PROBE_IP);
                 }
                 // Refresh the peer list once per second.
-                let (vpn_ip_str, count, peers) = collect_tailnet_info(handle.0);
+                let (vpn_ip_str, count, peers) = collect_tailnet_info(&handle);
                 let count_text = count_line(count);
                 let lines = build_lines(&vpn_ip_str, &count_text, &peers);
                 hits = gui.display_ota_page("Tailscale", &lines, "").await?;
@@ -239,39 +153,25 @@ fn span(text: &str, accent: bool) -> crate::watch_ui::OtaTextSpan<'_> {
 }
 
 /// Snapshot of our VPN IP and the peer table (online peers first).
-fn collect_tailnet_info(handle: *mut ml::microlink_s) -> (String, i32, Vec<(String, bool)>) {
+fn collect_tailnet_info(
+    handle: &crate::microlink::MicrolinkGuard,
+) -> (String, i32, Vec<(String, bool)>) {
     let mut vpn_ip_buf = [0u8; 16];
     // SAFETY: valid handle and buffer of sufficient size.
     unsafe {
-        let ip = ml::microlink_get_vpn_ip(handle);
+        let ip = ml::microlink_get_vpn_ip(handle.0);
         ml::microlink_ip_to_str(ip, vpn_ip_buf.as_mut_ptr() as *mut _);
     }
     let vpn_ip_str = std::ffi::CStr::from_bytes_until_nul(&vpn_ip_buf)
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    let count = unsafe { ml::microlink_get_peer_count(handle) }.max(0);
-    let mut peers: Vec<(String, bool)> = Vec::new();
-    for index in 0..count {
-        let mut info = ml::microlink_peer_info_t {
-            vpn_ip: 0,
-            hostname: [0; 64],
-            public_key: [0; 32],
-            online: false,
-            direct_path: false,
-        };
-        // SAFETY: valid handle and index within peer count.
-        if unsafe { ml::microlink_get_peer_info(handle, index, &mut info) }
-            == esp_idf_svc::sys::ESP_OK
-        {
-            let hostname = std::ffi::CStr::from_bytes_until_nul(&info.hostname)
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            peers.push((hostname, info.online));
-        }
-    }
-    peers.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    (vpn_ip_str, count, peers)
+    let nodes = crate::microlink::tailnet_nodes(handle);
+    let peers: Vec<(String, bool)> = nodes
+        .into_iter()
+        .map(|node| (node.hostname, node.online))
+        .collect();
+    (vpn_ip_str, peers.len() as i32, peers)
 }
 
 fn count_line(count: i32) -> String {

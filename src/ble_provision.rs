@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use esp32_nimble::{
     utilities::BleUuid, uuid128, BLEAdvertisementData, BLEDevice, BLEService, NimbleProperties,
 };
-use esp_idf_svc::nvs::EspDefaultNvs;
+use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
 use serde::{Deserialize, Serialize};
 
 // WifiCred / Setting / NVS 存储已抽到 crate::setting(无 BLE 依赖,OTA 救援固件共用)。
@@ -314,12 +314,31 @@ fn background_expected_size(data: &[u8]) -> anyhow::Result<usize> {
 
 /// 启动 BLE 配网:广播 "Watch",阻塞等手机写完配置 + 写 RESET,然后重启。
 /// `nvs` 被 move 进 BLE 回调;函数正常情况下由 restart 收尾,不返回。
-pub fn provision(nvs: EspDefaultNvs) -> anyhow::Result<()> {
+/// How the provisioning screen was left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BleProvisionOutcome {
+    /// Phone sent RESET: config is saved in NVS, apply by rebooting.
+    Reset,
+    /// User exited via the back button / right swipe. Config written so far
+    /// stays in NVS and applies on the next reboot.
+    Back,
+}
+
+pub fn provision(
+    gui: &mut crate::ui::UI,
+    touch: &mut crate::touch::TouchInput,
+) -> anyhow::Result<BleProvisionOutcome> {
+    crate::util::log_heap_usage("ble: before nimble init");
+    // Own NVS handle for this page (main keeps its own; NVS handles can
+    // coexist and writes are visible to both).
+    let partition = EspDefaultNvsPartition::take()?;
+    let nvs = EspDefaultNvs::new(partition, "setting", true)?;
     let setting = Setting::load_from_nvs(&nvs)?;
     let setting_arc = Arc::new(Mutex::new((setting, nvs)));
 
     BLEDevice::set_device_name("Watch")?;
     let ble = BLEDevice::take();
+    crate::util::log_heap_usage("ble: nimble initialized");
     let server = ble.get_server();
     let svc = server.create_service(SERVICE_ID);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<BtEvent>(8);
@@ -328,6 +347,7 @@ pub fn provision(nvs: EspDefaultNvs) -> anyhow::Result<()> {
         new_setting_service(&mut lock, setting_arc, tx)?;
     }
     server.start()?;
+    crate::util::log_heap_usage("ble: server started");
 
     let adv = ble.get_advertising();
     let mut data = BLEAdvertisementData::new();
@@ -337,18 +357,64 @@ pub fn provision(nvs: EspDefaultNvs) -> anyhow::Result<()> {
     adv.lock().start()?;
     log::info!("BLE provisioning: advertising as \"Watch\", waiting for config + RESET...");
 
+    fn span<'a>(text: &'a str, accent: bool) -> crate::watch_ui::OtaTextSpan<'a> {
+        crate::watch_ui::OtaTextSpan { text, accent }
+    }
+    let lines = vec![
+        vec![
+            span("Connect BLE \"Watch\"", false),
+            span("and open", false),
+        ],
+        vec![span("setup.html", true), span("to configure it.", false)],
+        vec![],
+        vec![span("The device reboots", false)],
+        vec![span("after config is applied.", false)],
+    ];
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    rt.block_on(async {
-        while let Some(ev) = rx.recv().await {
-            if matches!(ev, BtEvent::Reset) {
-                log::info!("BLE RESET received, restarting to apply config");
-                break;
+    let outcome = rt.block_on(async {
+        let hits = gui.display_ota_page("BLE Setup", &lines, "").await?;
+        loop {
+            tokio::select! {
+                event = rx.recv() => match event {
+                    Some(BtEvent::Reset) => {
+                        log::info!("BLE RESET received, restarting to apply config");
+                        return Ok(BleProvisionOutcome::Reset);
+                    }
+                    // All BLE senders gone: treat like leaving the page.
+                    None => return Ok(BleProvisionOutcome::Back),
+                },
+                gesture = touch.next_gesture() => match gesture {
+                    Some(crate::touch::TouchGesture::Click { start, end })
+                        if hits.back_hit_pair(start, end) =>
+                    {
+                        log::info!("BLE provisioning: back selected");
+                        return Ok(BleProvisionOutcome::Back);
+                    }
+                    Some(crate::touch::TouchGesture::Swipe {
+                        direction: crate::touch::SwipeDirection::Right,
+                        ..
+                    }) => {
+                        log::info!("BLE provisioning: right swipe, going back to settings");
+                        return Ok(BleProvisionOutcome::Back);
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Err(anyhow::anyhow!("touch event source closed"));
+                    }
+                },
             }
         }
-    });
+    })?;
 
-    std::thread::sleep(std::time::Duration::from_secs(1)); // 给 BLE 回调收尾、手机收到写响应
-    esp_idf_svc::hal::reset::restart();
+    if outcome == BleProvisionOutcome::Back {
+        // Free the NimBLE host + controller: BLE is not needed for the rest
+        // of the session and its memory is reclaimed.
+        if let Err(e) = BLEDevice::deinit() {
+            log::warn!("BLE deinit failed: {e:?}");
+        }
+    }
+    Ok(outcome)
 }

@@ -53,6 +53,14 @@ impl BacklightMode {
     }
 }
 
+/// Extracts the host part of an MQTT URI (`scheme://[user:pass@]host[:port]`).
+fn server_host(uri: &str) -> Option<String> {
+    let after_scheme = uri.split("://").nth(1).unwrap_or(uri);
+    let host_part = after_scheme.rsplit('@').next().unwrap_or(after_scheme);
+    let host = host_part.split([':', '/']).next().unwrap_or(host_part);
+    (!host.is_empty()).then(|| host.to_string())
+}
+
 pub async fn run(
     uri: String,
     client_id: String,
@@ -67,6 +75,53 @@ pub async fn run(
     start_in_settings: bool,
 ) -> anyhow::Result<crate::ui::SettingMenuSelection> {
     log::info!("Connecting to MQTT broker {uri} as {client_id} with new UI loop");
+
+    // If the broker lives inside our tailnet (100.64/10 CGNAT range), bring
+    // up microlink first and pre-establish the WireGuard handshake toward it
+    // so the MQTT session flows over the tunnel immediately. Otherwise skip
+    // microlink entirely — the tailnet is not needed to reach the broker.
+    // Guard lives to the end of run(): dropping it stops microlink and
+    // would tear down the tunnel the MQTT session is riding on.
+    let _microlink: Option<crate::microlink::MicrolinkGuard> = match server_host(&uri) {
+        Some(host)
+            if host
+                .parse::<std::net::Ipv4Addr>()
+                .is_ok_and(|ip| ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1])) =>
+        {
+            match crate::microlink::start_and_wait(
+                crate::microlink::TAILSCALE_AUTH_KEY,
+                crate::microlink::DEVICE_NAME,
+                "Tailscale",
+                std::time::Duration::from_secs(90),
+                gui,
+            )
+            .await
+            {
+                Some(ml) => {
+                    for node in crate::microlink::tailnet_nodes(&ml) {
+                        if node.vpn_ip.to_string() == host {
+                            log::info!(
+                                "remote: broker {host} is tailnet node {}, kicking WG handshake",
+                                node.hostname
+                            );
+                            ml.trigger_handshake(&host);
+                            break;
+                        }
+                    }
+                    Some(ml)
+                }
+                None => {
+                    log::warn!("remote: tailnet bring-up failed; MQTT may be unreachable");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    gui.show_status("Connecting MQTT...", uri.clone())
+        .await
+        .ok();
+
     let mut server = match MqttServer::new(&uri, &client_id).await {
         Ok(s) => s,
         Err(e) => {

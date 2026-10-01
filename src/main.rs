@@ -6,6 +6,7 @@ mod background;
 mod ble_provision;
 mod boot;
 mod lcd;
+mod microlink;
 mod mqtt;
 mod network;
 mod new_jpg;
@@ -126,13 +127,11 @@ fn main() -> anyhow::Result<()> {
 
     if setting.need_init() {
         // 首次启动:BLE 配网(手机连蓝牙 "Watch",通过 setup.html 写 WiFi 列表 + MQTT broker)
-        runtime
-            .block_on(gui.show_status("Setup", "Connect BLE \"Watch\"\nopen setup.html"))
-            .ok();
-
-        if let Err(e) = ble_provision::provision(nvs) {
-            log::error!("BLE provision failed: {e:?}");
-            std::thread::sleep(std::time::Duration::from_secs(3));
+        match ble_provision::provision(&mut gui, &mut touch)? {
+            ble_provision::BleProvisionOutcome::Reset => {}
+            ble_provision::BleProvisionOutcome::Back => {
+                log::warn!("BLE provisioning exited without config; restarting anyway");
+            }
         }
         restart();
     }
@@ -200,17 +199,12 @@ fn main() -> anyhow::Result<()> {
                                         ))?;
                                     }
                                     ui::SettingMenuSelection::Ble => {
-                                        runtime
-                                            .block_on(gui.show_status(
-                                                "BLE Setup",
-                                                "Connect BLE \"Watch\"\nopen setup.html",
-                                            ))
-                                            .ok();
-                                        if let Err(e) = ble_provision::provision(nvs) {
-                                            log::error!("BLE provision failed: {e:?}");
-                                            std::thread::sleep(std::time::Duration::from_secs(3));
+                                        match ble_provision::provision(&mut gui, &mut touch)? {
+                                            ble_provision::BleProvisionOutcome::Reset => {
+                                                restart();
+                                            }
+                                            ble_provision::BleProvisionOutcome::Back => {}
                                         }
-                                        restart();
                                     }
                                     ui::SettingMenuSelection::Reboot => restart(),
                                     ui::SettingMenuSelection::PowerOff => {
@@ -299,19 +293,13 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     ui::SettingMenuSelection::Ble => {
-                        runtime
-                            .block_on(
-                                gui.show_status(
-                                    "BLE Setup",
-                                    "Connect BLE \"Watch\"\nopen setup.html",
-                                ),
-                            )
-                            .ok();
-                        if let Err(e) = ble_provision::provision(nvs) {
-                            log::error!("BLE provision failed: {e:?}");
-                            std::thread::sleep(std::time::Duration::from_secs(3));
+                        match ble_provision::provision(&mut gui, &mut touch)? {
+                            ble_provision::BleProvisionOutcome::Reset => restart(),
+                            ble_provision::BleProvisionOutcome::Back => {
+                                // Reopen the remote UI on the settings page.
+                                reenter_remote_settings = true;
+                            }
                         }
-                        restart();
                     }
                     ui::SettingMenuSelection::Reboot => restart(),
                     ui::SettingMenuSelection::PowerOff => {
