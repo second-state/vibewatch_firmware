@@ -325,13 +325,16 @@ pub enum BleProvisionOutcome {
 }
 
 pub fn provision(
+    nvs_partition: &EspDefaultNvsPartition,
     gui: &mut crate::ui::UI,
     touch: &mut crate::touch::TouchInput,
 ) -> anyhow::Result<BleProvisionOutcome> {
     crate::util::log_heap_usage("ble: before nimble init");
     // Own NVS handle for this page (main keeps its own; NVS handles can
-    // coexist and writes are visible to both).
-    let partition = EspDefaultNvsPartition::take()?;
+    // coexist and writes are visible to both). The partition is cloned from
+    // main: EspDefaultNvsPartition::take() is a once-per-boot global and a
+    // second call fails with ESP_ERR_INVALID_STATE.
+    let partition = nvs_partition.clone();
     let nvs = EspDefaultNvs::new(partition, "setting", true)?;
     let setting = Setting::load_from_nvs(&nvs)?;
     let setting_arc = Arc::new(Mutex::new((setting, nvs)));

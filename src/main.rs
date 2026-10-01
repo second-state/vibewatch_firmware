@@ -59,8 +59,11 @@ fn main() -> anyhow::Result<()> {
     let peripherals = esp_idf_svc::hal::peripherals::Peripherals::take().unwrap();
     let sysloop = EspSystemEventLoop::take()?;
     let _fs = esp_idf_svc::io::vfs::MountedEventfs::mount(20)?;
+    // take() is a once-per-boot global; keep the partition alive so the BLE
+    // provisioning page can clone it instead of double-taking (which fails
+    // with ESP_ERR_INVALID_STATE).
     let partition = esp_idf_svc::nvs::EspDefaultNvsPartition::take()?;
-    let mut nvs = esp_idf_svc::nvs::EspDefaultNvs::new(partition, "setting", true)?;
+    let mut nvs = esp_idf_svc::nvs::EspDefaultNvs::new(partition.clone(), "setting", true)?;
     let setting = setting::Setting::load_from_nvs(&nvs)?;
     ui::set_clock_utc_offset_secs(setting.timezone_offset_secs);
     let asr_config = audio::AsrConfig::load_from_nvs(&nvs);
@@ -127,7 +130,7 @@ fn main() -> anyhow::Result<()> {
 
     if setting.need_init() {
         // 首次启动:BLE 配网(手机连蓝牙 "Watch",通过 setup.html 写 WiFi 列表 + MQTT broker)
-        match ble_provision::provision(&mut gui, &mut touch)? {
+        match ble_provision::provision(&partition, &mut gui, &mut touch)? {
             ble_provision::BleProvisionOutcome::Reset => {}
             ble_provision::BleProvisionOutcome::Back => {
                 log::warn!("BLE provisioning exited without config; restarting anyway");
@@ -199,7 +202,9 @@ fn main() -> anyhow::Result<()> {
                                         ))?;
                                     }
                                     ui::SettingMenuSelection::Ble => {
-                                        match ble_provision::provision(&mut gui, &mut touch)? {
+                                        match ble_provision::provision(
+                                            &partition, &mut gui, &mut touch,
+                                        )? {
                                             ble_provision::BleProvisionOutcome::Reset => {
                                                 restart();
                                             }
@@ -293,7 +298,7 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     ui::SettingMenuSelection::Ble => {
-                        match ble_provision::provision(&mut gui, &mut touch)? {
+                        match ble_provision::provision(&partition, &mut gui, &mut touch)? {
                             ble_provision::BleProvisionOutcome::Reset => restart(),
                             ble_provision::BleProvisionOutcome::Back => {
                                 // Reopen the remote UI on the settings page.
