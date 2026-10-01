@@ -746,10 +746,11 @@ where
         )
         .into_styled(PrimitiveStyle::with_fill(dot))
         .draw(target)?;
-        draw_label(
+        // unifont glyphs are 16 px tall vs helvB12's ~13, so center with +4.
+        draw_label_cjk(
             target,
             row.label,
-            rect.top_left + Point::new(s.sw(34) as i32, row_h as i32 / 2 + 6),
+            rect.top_left + Point::new(s.sw(34) as i32, row_h as i32 / 2 + 4),
             Palette::TEXT,
             Alignment::Left,
         )?;
@@ -1399,6 +1400,23 @@ where
     D: DrawTarget<Color = Color>,
 {
     Text::with_alignment(text, point, label_style(color), alignment)
+        .draw(target)
+        .map(|_| ())
+}
+
+/// Like [`draw_label`] but with full CJK coverage (unifont_t_gb2312), for
+/// user-provided text that may contain Chinese (e.g. session names).
+fn draw_label_cjk<D>(
+    target: &mut D,
+    text: &str,
+    point: Point,
+    color: Color,
+    alignment: Alignment,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Color>,
+{
+    Text::with_alignment(text, point, terminal_style(color), alignment)
         .draw(target)
         .map(|_| ())
 }
