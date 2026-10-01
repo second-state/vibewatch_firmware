@@ -10,7 +10,12 @@ pub(crate) const TAILSCALE_AUTH_KEY: &str = "tskey-auth-xxxx";
 pub(crate) const DEVICE_NAME: &str = "vibewatch";
 
 /// Stops and frees the microlink instance whenever the session ends.
-pub(crate) struct MicrolinkGuard(pub(crate) *mut ml::microlink_s);
+/// The CStrings keep `ml->config`'s `auth_key`/`device_name` pointers valid:
+/// `microlink_init` shallow-copies the config (pointers only), so the strings
+/// must outlive the session or every Hostinfo report reads freed memory.
+/// The strings are never read again; their liveness is the point.
+#[allow(dead_code)] // field 1: kept for pointer liveness, intentionally unread
+pub(crate) struct MicrolinkGuard(pub(crate) *mut ml::microlink_s, [std::ffi::CString; 2]);
 
 impl Drop for MicrolinkGuard {
     fn drop(&mut self) {
@@ -85,8 +90,12 @@ pub(crate) async fn start_and_wait(
         stun_interval_ms: 0,
         ctrl_watchdog_ms: 0,
     };
-    // SAFETY: config outlives the call (copied internally by microlink_init).
-    let handle = MicrolinkGuard(unsafe { ml::microlink_init(&config) });
+    // SAFETY: config is shallow-copied by microlink_init (pointers only), so
+    // the CStrings are kept alive inside the guard for the whole session.
+    let handle = MicrolinkGuard(
+        unsafe { ml::microlink_init(&config) },
+        [auth_key, device_name],
+    );
     if handle.0.is_null() {
         gui.show_status(title, "Init failed").await.ok();
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
