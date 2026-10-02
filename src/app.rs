@@ -115,7 +115,6 @@ pub enum SettingAction {
     Ota,
     SyncTime,
     Ble,
-    Tailscale,
     Reboot,
     PowerOff,
 }
@@ -699,9 +698,8 @@ impl AppState {
                     0 => SettingAction::Ota,
                     1 => SettingAction::SyncTime,
                     2 => SettingAction::Ble,
-                    3 => SettingAction::Tailscale,
-                    4 => SettingAction::Reboot,
-                    5 => SettingAction::PowerOff,
+                    3 => SettingAction::Reboot,
+                    4 => SettingAction::PowerOff,
                     _ => return AppEventResult::none(),
                 };
                 log::info!("new UI settings action selected: {action:?}");
