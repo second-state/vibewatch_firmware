@@ -127,6 +127,18 @@ impl WifiManager {
     }
 }
 
+/// True when the broker URI points at a tailnet IP (100.64/10). Reaching it
+/// requires microlink + the DERP relay, whose TLS needs a trustworthy clock,
+/// so callers re-check time even when it was already synced this boot.
+pub fn is_tailnet_server(uri: &str) -> bool {
+    let host_part = uri.split("://").nth(1).unwrap_or(uri);
+    let host = host_part.split([':', '/']).next().unwrap_or(host_part);
+    !host.is_empty()
+        && host
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]))
+}
+
 pub async fn sync_time_with_ui(
     gui: &mut crate::ui::UI,
     touch: &mut crate::touch::TouchInput,

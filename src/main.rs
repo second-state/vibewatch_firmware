@@ -135,6 +135,11 @@ fn main() -> anyhow::Result<()> {
             ble_provision::BleProvisionOutcome::Back => {
                 log::warn!("BLE provisioning exited without config; restarting anyway");
             }
+            // First boot has no WiFi manager yet; the key persists in NVS —
+            // write it again over BLE after reboot to open the Tailscale page.
+            ble_provision::BleProvisionOutcome::Tailscale => {
+                log::info!("tailscale_key provisioned on first boot; applies after reboot");
+            }
         }
         restart();
     }
@@ -196,11 +201,6 @@ fn main() -> anyhow::Result<()> {
                                             time_synced = true;
                                         }
                                     }
-                                    ui::SettingMenuSelection::Tailscale => {
-                                        runtime.block_on(tailscale::run(
-                                            &mut wifi, &setting, &mut gui, &mut touch,
-                                        ))?;
-                                    }
                                     ui::SettingMenuSelection::Ble => {
                                         match ble_provision::provision(
                                             &partition, &mut gui, &mut touch,
@@ -209,6 +209,13 @@ fn main() -> anyhow::Result<()> {
                                                 restart();
                                             }
                                             ble_provision::BleProvisionOutcome::Back => {}
+                                            ble_provision::BleProvisionOutcome::Tailscale => {
+                                                runtime.block_on(tailscale::run(
+                                                    &mut wifi, &mut nvs, &setting, &mut gui,
+                                                    &mut touch,
+                                                ))?;
+                                                // Reopen the settings page.
+                                            }
                                         }
                                     }
                                     ui::SettingMenuSelection::Reboot => restart(),
@@ -241,7 +248,10 @@ fn main() -> anyhow::Result<()> {
             restart();
         }
         log::info!("WiFi connected");
-        if time_synced {
+        // A tailnet broker rides the DERP relay, whose TLS needs a synced
+        // clock — re-check time on every entry even if this boot already
+        // synced once (the HTTP Date fast path keeps it cheap).
+        if time_synced && !network::is_tailnet_server(&setting.server_url) {
             log::info!("Time already synced since boot; skipping time sync");
         } else {
             time_synced = runtime.block_on(network::sync_time_and_timezone_with_ui(
@@ -274,12 +284,6 @@ fn main() -> anyhow::Result<()> {
             Ok(selection) => {
                 wifi.disconnect_and_stop();
                 match selection {
-                    ui::SettingMenuSelection::Tailscale => {
-                        runtime
-                            .block_on(tailscale::run(&mut wifi, &setting, &mut gui, &mut touch))?;
-                        // Back from the Tailscale page: reopen the settings page.
-                        reenter_remote_settings = true;
-                    }
                     ui::SettingMenuSelection::Ota => {
                         runtime.block_on(ota::run(
                             &mut wifi, &setting, &mut gui, &mut touch, &mut nvs,
@@ -301,6 +305,13 @@ fn main() -> anyhow::Result<()> {
                         match ble_provision::provision(&partition, &mut gui, &mut touch)? {
                             ble_provision::BleProvisionOutcome::Reset => restart(),
                             ble_provision::BleProvisionOutcome::Back => {
+                                // Reopen the remote UI on the settings page.
+                                reenter_remote_settings = true;
+                            }
+                            ble_provision::BleProvisionOutcome::Tailscale => {
+                                runtime.block_on(tailscale::run(
+                                    &mut wifi, &mut nvs, &setting, &mut gui, &mut touch,
+                                ))?;
                                 // Reopen the remote UI on the settings page.
                                 reenter_remote_settings = true;
                             }

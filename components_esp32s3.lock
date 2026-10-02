@@ -146,7 +146,7 @@ dependencies:
       git: https://github.com/L-jasmine/microlink
       path: components/microlink
       type: git
-    version: cbc603728f71dff9d9beb28eb515f876503ebd4b
+    version: 3a170101c2ef50d63cc21b1754b3350ea135b094
   waveshare/esp32_s3_touch_amoled_2_06:
     component_hash: a68c5c26aabb00634f46834116a62413f75f34d672a8b3c639b8f8253160ec68
     dependencies:
@@ -210,7 +210,7 @@ dependencies:
       git: https://github.com/L-jasmine/microlink
       path: components/microlink/components/wireguard_lwip
       type: git
-    version: cbc603728f71dff9d9beb28eb515f876503ebd4b
+    version: 3a170101c2ef50d63cc21b1754b3350ea135b094
 direct_dependencies:
 - espressif/esp_new_jpeg
 - microlink
