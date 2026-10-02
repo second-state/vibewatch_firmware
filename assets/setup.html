@@ -94,6 +94,25 @@
 
                     <div class="card bg-base-100 border border-base-300">
                         <div class="card-body">
+                            <h3 class="card-title text-lg" id="tailscaleTitle">Tailscale</h3>
+                            <p class="text-xs opacity-70">Paste a tailnet auth key (tskey-auth-...) and bind. The
+                                watch wipes its previous tailnet registration, joins with this key, and shows the
+                                node list. It will disconnect BLE while doing so.</p>
+                            <label class="form-control">
+                                <div class="label">
+                                    <span class="label-text">Auth key</span>
+                                </div>
+                                <input type="password" id="tailscaleKeyInput" placeholder="tskey-auth-..."
+                                    class="input input-bordered w-full">
+                            </label>
+                            <button class="btn btn-outline w-full" id="bindTailscaleButton" disabled>
+                                Bind Tailscale
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="card bg-base-100 border border-base-300">
+                        <div class="card-body">
                             <h3 class="card-title text-lg">Audio Prompt</h3>
                             <p class="text-xs opacity-70">Upload one WAV file. It is decoded to 16kHz mono PCM before
                                 sending. Maximum PCM size: 256KB.</p>
@@ -201,6 +220,8 @@
         const asrUriInput = document.getElementById('asrUriInput');
         const asrApiKeyInput = document.getElementById('asrApiKeyInput');
         const asrModelInput = document.getElementById('asrModelInput');
+        const tailscaleKeyInput = document.getElementById('tailscaleKeyInput');
+        const bindTailscaleButton = document.getElementById('bindTailscaleButton');
         const audioFileInput = document.getElementById('audioFileInput');
         const audioFileStatus = document.getElementById('audioFileStatus');
         const uploadAudioButton = document.getElementById('uploadAudioButton');
@@ -435,6 +456,8 @@
             asrUriInput.disabled = false;
             asrApiKeyInput.disabled = false;
             asrModelInput.disabled = false;
+            tailscaleKeyInput.disabled = false;
+            bindTailscaleButton.disabled = !tailscaleKeyInput.value.trim();
             audioFileInput.disabled = false;
             uploadAudioButton.disabled = !audioFileInput.files[0];
             backgroundFileInput.disabled = false;
@@ -450,6 +473,8 @@
             asrUriInput.disabled = true;
             asrApiKeyInput.disabled = true;
             asrModelInput.disabled = true;
+            tailscaleKeyInput.disabled = true;
+            bindTailscaleButton.disabled = true;
             audioFileInput.disabled = true;
             uploadAudioButton.disabled = true;
             backgroundFileInput.disabled = true;
@@ -592,6 +617,36 @@
                 api_key: asrApiKeyInput.value || '',
                 model: asrModelInput.value || ''
             };
+        }
+
+        // Bind Tailscale: send {"tailscale_key": ...} on its own. The device
+        // ignores every other field in this write, wipes its previous tailnet
+        // registration, and switches to the Tailscale page (BLE drops).
+        async function bindTailscale() {
+            if (!isConnected || !service) {
+                showNotification('Error', 'VibeWatch is not connected', true);
+                return;
+            }
+            const key = tailscaleKeyInput.value.trim();
+            if (!key) {
+                showNotification('Error', 'Please paste a tailnet auth key', true);
+                return;
+            }
+
+            bindTailscaleButton.disabled = true;
+            bindTailscaleButton.textContent = 'Binding...';
+            try {
+                await writeConfigPatch({ tailscale_key: key });
+                tailscaleKeyInput.value = '';
+                showNotification('Success',
+                    'Tailscale key sent — the watch is joining your tailnet');
+            } catch (error) {
+                console.error('Tailscale bind failed:', error);
+                showNotification('Error', 'Tailscale bind failed: ' + error.message, true);
+            } finally {
+                bindTailscaleButton.disabled = !isConnected || !tailscaleKeyInput.value.trim();
+                bindTailscaleButton.textContent = 'Bind Tailscale';
+            }
         }
 
         function validateAudioFile(file) {
@@ -860,6 +915,16 @@
         asrUriInput.addEventListener('input', () => markFieldAsModified('asr', asrTitle));
         asrApiKeyInput.addEventListener('input', () => markFieldAsModified('asr', asrTitle));
         asrModelInput.addEventListener('input', () => markFieldAsModified('asr', asrTitle));
+
+        // Tailscale: bind button activates once a key is typed; sending is
+        // immediate (not part of Save Changes).
+        tailscaleKeyInput.addEventListener('input', () => {
+            bindTailscaleButton.disabled = !isConnected || !tailscaleKeyInput.value.trim();
+        });
+
+        bindTailscaleButton.addEventListener('click', () => {
+            bindTailscale();
+        });
 
         audioFileInput.addEventListener('change', async () => {
             const file = audioFileInput.files[0];

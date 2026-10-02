@@ -4,6 +4,8 @@
 //! - CONFIG 特征值(READ|WRITE):写 = JSON 部分更新
 //!   `{"wifi_list":[{ssid,pass}...], "server_url":..., "asr_config":...}`,
 //!   顺序即连接优先级;读 = 当前整份快照。
+//!   `{"tailscale_key":"tskey-auth-..."}` 优先级最高:存 key + 擦除旧 tailnet
+//!   注册,然后 UI 切到 Tailscale 页面,其余字段忽略。
 //! - AUDIO 特征值(WRITE):第一包 little-endian u32 PCM byte length,后续包 PCM bytes;最大 256KB。
 //! - BACKGROUND 特征值(WRITE):第一包 little-endian u32 GIF byte length,后续包 GIF bytes;最大 128KB。
 //! - RESET 特征值(WRITE):写入 `b"RESET"` 触发重启应用配置。
@@ -32,6 +34,10 @@ const MAX_AUDIO_BYTES: usize = 256 * 1024;
 /// CONFIG 写载荷:部分配置,缺失字段保持原状。
 #[derive(Debug, Deserialize)]
 struct ConfigPatch {
+    /// Takes precedence over every other field: when present the device
+    /// stores the key, wipes its previous tailnet registration, and switches
+    /// to the Tailscale page — the other fields are ignored.
+    tailscale_key: Option<String>,
     wifi_list: Option<Vec<WifiCred>>,
     server_url: Option<String>,
     asr_config: Option<serde_json::Value>,
@@ -59,6 +65,9 @@ struct ConfigSnapshot<'a> {
 #[derive(Debug)]
 pub enum BtEvent {
     Reset,
+    /// CONFIG received {"tailscale_key": ...}: key saved, leave to the
+    /// Tailscale page.
+    Tailscale,
 }
 
 /// 注册配网 GATT 服务(CONFIG + RESET)。
@@ -71,6 +80,7 @@ pub fn new_setting_service(
     let setting_w = setting.clone();
     let setting_audio = setting.clone();
     let setting_background = setting.clone();
+    let evt_tx_config = evt_tx.clone();
     let audio_upload = Arc::new(Mutex::new(None::<AudioUpload>));
     let background_upload = Arc::new(Mutex::new(None::<BackgroundUpload>));
 
@@ -104,6 +114,34 @@ pub fn new_setting_service(
                 log::warn!("BLE config: invalid JSON, ignored");
                 return;
             };
+
+            // tailscale_key takes precedence: store the key, wipe any
+            // previous tailnet registration (microlink caches node keys in
+            // NVS; without the reset the new key would be ignored), and
+            // leave to the Tailscale page. Other fields are ignored.
+            if let Some(key) = patch.tailscale_key {
+                if key.is_empty() {
+                    log::warn!("BLE config: empty tailscale_key, ignored");
+                    return;
+                }
+                // SAFETY: plain NVS erase; no microlink instance is running
+                // while the BLE page is up.
+                unsafe {
+                    let rc = esp_idf_svc::sys::microlink::microlink_factory_reset();
+                    if rc != esp_idf_svc::sys::ESP_OK {
+                        log::warn!("microlink factory reset failed: {rc}");
+                    }
+                }
+                let s = setting_w.lock().unwrap();
+                if let Err(e) = s.1.set_str(crate::tailscale::NVS_KEY, &key) {
+                    log::error!("Failed to save tailscale_key: {e:?}");
+                    return;
+                }
+                drop(s);
+                log::info!("BLE config: tailscale_key stored, switching to Tailscale page");
+                let _ = evt_tx_config.blocking_send(BtEvent::Tailscale);
+                return;
+            }
             let mut s = setting_w.lock().unwrap();
             if let Some(mut list) = patch.wifi_list {
                 if list.len() > MAX_WIFI_CREDS {
@@ -322,6 +360,8 @@ pub enum BleProvisionOutcome {
     /// User exited via the back button / right swipe. Config written so far
     /// stays in NVS and applies on the next reboot.
     Back,
+    /// Phone sent {"tailscale_key": ...}: key stored, join the tailnet now.
+    Tailscale,
 }
 
 pub fn provision(
@@ -386,6 +426,10 @@ pub fn provision(
                         log::info!("BLE RESET received, restarting to apply config");
                         return Ok(BleProvisionOutcome::Reset);
                     }
+                    Some(BtEvent::Tailscale) => {
+                        log::info!("BLE tailscale_key received, switching to Tailscale page");
+                        return Ok(BleProvisionOutcome::Tailscale);
+                    }
                     // All BLE senders gone: treat like leaving the page.
                     None => return Ok(BleProvisionOutcome::Back),
                 },
@@ -412,9 +456,9 @@ pub fn provision(
         }
     })?;
 
-    if outcome == BleProvisionOutcome::Back {
+    if outcome != BleProvisionOutcome::Reset {
         // Free the NimBLE host + controller: BLE is not needed for the rest
-        // of the session and its memory is reclaimed.
+        // of the session and its memory is reclaimed (Reset reboots anyway).
         if let Err(e) = BLEDevice::deinit() {
             log::warn!("BLE deinit failed: {e:?}");
         }
