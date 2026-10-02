@@ -112,6 +112,10 @@ pub async fn run(
             }
         }
     }
+    // Microlink teardown (stop + destroy) takes a while; acknowledge the
+    // exit immediately with a notice box so the node list doesn't linger
+    // as if the gesture was missed.
+    gui.show_status("Tailscale", "Shutting down...").await.ok();
     // MicrolinkGuard stops/destroys the session on the way out.
     Ok(())
 }

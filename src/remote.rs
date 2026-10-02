@@ -358,6 +358,9 @@ pub async fn run(
                         app::SettingAction::Ota => crate::ui::SettingMenuSelection::Ota,
                         app::SettingAction::SyncTime => crate::ui::SettingMenuSelection::SyncTime,
                         app::SettingAction::Ble => crate::ui::SettingMenuSelection::Ble,
+                        app::SettingAction::Tailscale => {
+                            crate::ui::SettingMenuSelection::Tailscale
+                        }
                         app::SettingAction::Reboot => crate::ui::SettingMenuSelection::Reboot,
                         app::SettingAction::PowerOff => crate::ui::SettingMenuSelection::PowerOff,
                     });

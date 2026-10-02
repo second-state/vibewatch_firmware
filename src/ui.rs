@@ -623,6 +623,7 @@ pub enum SettingMenuSelection {
     Ota,
     SyncTime,
     Ble,
+    Tailscale,
     Reboot,
     PowerOff,
     Back,
@@ -824,8 +825,9 @@ pub async fn setting_menu(
                         0 => SettingMenuSelection::Ota,
                         1 => SettingMenuSelection::SyncTime,
                         2 => SettingMenuSelection::Ble,
-                        3 => SettingMenuSelection::Reboot,
-                        4 => SettingMenuSelection::PowerOff,
+                        3 => SettingMenuSelection::Tailscale,
+                        4 => SettingMenuSelection::Reboot,
+                        5 => SettingMenuSelection::PowerOff,
                         _ => {
                             hits = gui.display_settings_list().await?;
                             continue;
@@ -1803,6 +1805,7 @@ impl UI {
             "OTA Update",
             "Sync Time",
             "Enable BLE",
+            "Tailscale",
             "Reboot",
             "Power Off",
         ];

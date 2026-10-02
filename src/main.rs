@@ -218,6 +218,12 @@ fn main() -> anyhow::Result<()> {
                                             }
                                         }
                                     }
+                                    ui::SettingMenuSelection::Tailscale => {
+                                        runtime.block_on(tailscale::run(
+                                            &mut wifi, &mut nvs, &setting, &mut gui, &mut touch,
+                                        ))?;
+                                        // Reopen the settings page.
+                                    }
                                     ui::SettingMenuSelection::Reboot => restart(),
                                     ui::SettingMenuSelection::PowerOff => {
                                         crate::power::shutdown();
@@ -316,6 +322,13 @@ fn main() -> anyhow::Result<()> {
                                 reenter_remote_settings = true;
                             }
                         }
+                    }
+                    ui::SettingMenuSelection::Tailscale => {
+                        runtime.block_on(tailscale::run(
+                            &mut wifi, &mut nvs, &setting, &mut gui, &mut touch,
+                        ))?;
+                        // Reopen the remote UI on the settings page.
+                        reenter_remote_settings = true;
                     }
                     ui::SettingMenuSelection::Reboot => restart(),
                     ui::SettingMenuSelection::PowerOff => {
