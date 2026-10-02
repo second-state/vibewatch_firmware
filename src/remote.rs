@@ -88,30 +88,65 @@ pub async fn run(
                 .parse::<std::net::Ipv4Addr>()
                 .is_ok_and(|ip| ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1])) =>
         {
-            match crate::microlink::start_and_wait(
-                crate::microlink::TAILSCALE_AUTH_KEY,
-                crate::microlink::DEVICE_NAME,
-                "Tailscale",
-                std::time::Duration::from_secs(90),
-                gui,
-            )
-            .await
-            {
-                Some(ml) => {
-                    for node in crate::microlink::tailnet_nodes(&ml) {
-                        if node.vpn_ip.to_string() == host {
-                            log::info!(
-                                "remote: broker {host} is tailnet node {}, kicking WG handshake",
-                                node.hostname
-                            );
-                            ml.trigger_handshake(&host);
-                            break;
+            // Joining the tailnet needs the auth key provisioned over BLE.
+            match crate::tailscale::stored_auth_key(nvs) {
+                Some(auth_key) => {
+                    match crate::microlink::start_and_wait(
+                        &auth_key,
+                        crate::microlink::DEVICE_NAME,
+                        "Tailscale",
+                        std::time::Duration::from_secs(90),
+                        gui,
+                    )
+                    .await
+                    {
+                        Some(ml) => {
+                            // Move our DERP mailbox next to the broker's
+                            // before the handshake: relayed packets only
+                            // travel through our own mailbox, so a broker
+                            // in another region is otherwise unreachable.
+                            match ml.rehome_to_peer(&host) {
+                                Some(region) => {
+                                    log::info!(
+                                        "remote: DERP mailbox rehomed to broker home region {region}"
+                                    );
+                                    gui.show_status(
+                                        "Tailscale",
+                                        format!("Rehoming mailbox to region {region}..."),
+                                    )
+                                    .await
+                                    .ok();
+                                    // Give the DERP task a moment to
+                                    // reconnect to the new region; the
+                                    // handshake INIT rides it.
+                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                }
+                                None => {
+                                    log::warn!(
+                                        "remote: broker home region unknown, keeping current mailbox"
+                                    );
+                                }
+                            }
+                            for node in crate::microlink::tailnet_nodes(&ml) {
+                                if node.vpn_ip.to_string() == host {
+                                    log::info!(
+                                        "remote: broker {host} is tailnet node {}, kicking WG handshake",
+                                        node.hostname
+                                    );
+                                    ml.trigger_handshake(&host);
+                                    break;
+                                }
+                            }
+                            Some(ml)
+                        }
+                        None => {
+                            log::warn!("remote: tailnet bring-up failed; MQTT may be unreachable");
+                            None
                         }
                     }
-                    Some(ml)
                 }
                 None => {
-                    log::warn!("remote: tailnet bring-up failed; MQTT may be unreachable");
+                    log::warn!("remote: no Tailscale key provisioned; MQTT may be unreachable");
                     None
                 }
             }
@@ -323,9 +358,6 @@ pub async fn run(
                         app::SettingAction::Ota => crate::ui::SettingMenuSelection::Ota,
                         app::SettingAction::SyncTime => crate::ui::SettingMenuSelection::SyncTime,
                         app::SettingAction::Ble => crate::ui::SettingMenuSelection::Ble,
-                        app::SettingAction::Tailscale => {
-                            crate::ui::SettingMenuSelection::Tailscale
-                        }
                         app::SettingAction::Reboot => crate::ui::SettingMenuSelection::Reboot,
                         app::SettingAction::PowerOff => crate::ui::SettingMenuSelection::PowerOff,
                     });

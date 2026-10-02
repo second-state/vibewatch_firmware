@@ -1,23 +1,49 @@
-//! Experimental Tailscale page (try-tailscale branch): joins the tailnet via
-//! the microlink component and lists known peers. Back button or right swipe
-//! returns to the settings page.
+//! Tailscale page: joins the tailnet via the microlink component and lists
+//! the nodes under the account. There is no menu entry — the page is only
+//! reached by writing {"tailscale_key": "..."} over BLE provisioning, which
+//! stores the key in NVS and hands control to this page. Back button or
+//! right swipe exits.
 
+use esp_idf_svc::nvs::EspDefaultNvs;
 use esp_idf_svc::sys::microlink as ml;
 
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
-/// Peer probed with an HTTP GET once per second while the page is open.
-const PROBE_IP: &str = "100.107.32.114";
-const PROBE_PORT: u16 = 9090;
-const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+/// NVS key (in the "setting" namespace) holding the tailnet auth key written
+/// over BLE.
+pub(crate) const NVS_KEY: &str = "tailscale_key";
+
+/// Reads the stored tailnet auth key, if one has been provisioned.
+pub(crate) fn stored_auth_key(nvs: &EspDefaultNvs) -> Option<String> {
+    // str_len counts the NUL terminator; get_str returns the string WITHOUT
+    // it — use its return value, not the raw buffer (whose last byte is NUL).
+    let len = nvs.str_len(NVS_KEY).ok()??;
+    if len <= 1 {
+        return None;
+    }
+    let mut buffer = vec![0u8; len];
+    nvs.get_str(NVS_KEY, &mut buffer)
+        .ok()?
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+}
 
 pub async fn run(
     wifi: &mut crate::network::WifiManager,
+    nvs: &mut EspDefaultNvs,
     setting: &crate::setting::Setting,
     gui: &mut crate::ui::UI,
     touch: &mut crate::touch::TouchInput,
 ) -> anyhow::Result<()> {
     crate::util::log_heap_usage("page -> tailscale");
+    let Some(auth_key) = stored_auth_key(nvs) else {
+        gui.show_status("Tailscale", "No Tailscale key\n(provision via BLE)")
+            .await
+            .ok();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        return Ok(());
+    };
+
     gui.show_status("Tailscale", "Connecting WiFi...")
         .await
         .ok();
@@ -30,8 +56,16 @@ pub async fn run(
         return Ok(());
     }
 
+    // The DERP relay speaks TLS, which needs a trustworthy clock (a fresh
+    // boot starts at 1970). Sync before microlink; a user-skipped sync is
+    // tolerated — DERP may just fail.
+    let synced = crate::network::sync_time_and_timezone_with_ui(gui, touch, nvs).await?;
+    if !synced {
+        log::warn!("Tailscale: time sync skipped; DERP TLS may fail");
+    }
+
     let Some(handle) = crate::microlink::start_and_wait(
-        crate::microlink::TAILSCALE_AUTH_KEY,
+        &auth_key,
         crate::microlink::DEVICE_NAME,
         "Tailscale",
         CONNECT_TIMEOUT,
@@ -42,51 +76,19 @@ pub async fn run(
         return Ok(());
     };
 
-    let (vpn_ip_str, count, peers) = collect_tailnet_info(&handle);
-    let count_text = count_line(count);
-    let lines = build_lines(&vpn_ip_str, &count_text, &peers);
+    // Node list page: refresh once per second (online states change as peers
+    // come and go), exit on back / right swipe. The snapshot values live in
+    // this scope because the page lines borrow them.
+    let (mut vpn_ip_str, mut count_text, mut nodes) = tailnet_snapshot(&handle);
+    let lines = build_lines(&vpn_ip_str, &count_text, &nodes);
     let mut hits = gui.display_ota_page("Tailscale", &lines, "").await?;
-
-    // Move our DERP "mailbox" to the probe target's home region. microlink
-    // only delivers relayed packets through our own home region, which
-    // returns PeerGone when the peer lives in a different region.
-    let probe_ip_cstr = std::ffi::CString::new(PROBE_IP).unwrap();
-    let probe_target_ip = unsafe { ml::microlink_parse_ip(probe_ip_cstr.as_ptr()) };
-    let peer_region = unsafe { ml::microlink_get_peer_home_region(handle.0, probe_target_ip) };
-    if peer_region > 0 {
-        log::info!("Tailscale: rehoming our DERP mailbox to peer region {peer_region}");
-        // SAFETY: valid handle from microlink_init.
-        unsafe {
-            ml::microlink_rehome_derp(handle.0, peer_region);
-        }
-    }
-
-    // Kick the WG handshake toward the probe target. Our traffic path is
-    // tokio TCP, which unlike microlink_tcp_connect does not trigger the
-    // handshake itself — and microlink's peers are passive by default.
-    handle.trigger_handshake(PROBE_IP);
-
-    // Probe loop: one HTTP GET per second to the peer over the tunnel,
-    // interleaved with touch handling (back/right swipe exits the page).
-    let mut probe_tick = tokio::time::interval(PROBE_INTERVAL);
-    probe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut refresh = tokio::time::interval(std::time::Duration::from_secs(1));
+    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            _ = probe_tick.tick() => {
-                let ok = http_get_once().await;
-                log::info!(
-                    "Tailscale probe GET http://{PROBE_IP}:{PROBE_PORT} -> {}",
-                    if ok { "ok" } else { "failed" }
-                );
-                if !ok {
-                    // Tunnel still down (e.g. DERP reconnect in flight after
-                    // the rehome) — re-kick the WG handshake each attempt.
-                    handle.trigger_handshake(PROBE_IP);
-                }
-                // Refresh the peer list once per second.
-                let (vpn_ip_str, count, peers) = collect_tailnet_info(&handle);
-                let count_text = count_line(count);
-                let lines = build_lines(&vpn_ip_str, &count_text, &peers);
+            _ = refresh.tick() => {
+                (vpn_ip_str, count_text, nodes) = tailnet_snapshot(&handle);
+                let lines = build_lines(&vpn_ip_str, &count_text, &nodes);
                 hits = gui.display_ota_page("Tailscale", &lines, "").await?;
             }
             gesture = touch.next_gesture() => {
@@ -114,48 +116,37 @@ pub async fn run(
     Ok(())
 }
 
-/// One plain HTTP/1.0 GET via tokio's TCP stack. Traffic reaches the peer
-/// through the WireGuard tunnel as long as microlink's lwIP routes are in
-/// place. Reports current memory usage as query params. Returns true if the
-/// request was sent and a response arrived.
-async fn http_get_once() -> bool {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+/// Page body: our VPN IP, node count, then names (online in the accent
+/// color, offline dimmed with a marker). Borrows the snapshot values so they
+/// must outlive the rendered page.
+fn build_lines<'a>(
+    vpn_ip_str: &'a str,
+    count_text: &'a str,
+    nodes: &'a [crate::microlink::TailnetNode],
+) -> Vec<Vec<crate::watch_ui::OtaTextSpan<'a>>> {
+    fn span(text: &str, accent: bool) -> crate::watch_ui::OtaTextSpan<'_> {
+        crate::watch_ui::OtaTextSpan { text, accent }
+    }
 
-    let attempt = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        let mut stream = tokio::net::TcpStream::connect((PROBE_IP, PROBE_PORT)).await?;
-        // Report memory usage: total free, historic minimum, internal RAM,
-        // and PSRAM free sizes in bytes.
-        // SAFETY: plain ESP-IDF heap queries.
-        let (free_heap, min_free, internal_free, psram_free) = unsafe {
-            (
-                esp_idf_svc::sys::esp_get_free_heap_size(),
-                esp_idf_svc::sys::esp_get_minimum_free_heap_size(),
-                esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_INTERNAL),
-                esp_idf_svc::sys::heap_caps_get_free_size(esp_idf_svc::sys::MALLOC_CAP_SPIRAM),
-            )
-        };
-        let request = format!(
-            "GET /?free_heap={free_heap}&min_free={min_free}\
-&internal_free={internal_free}&psram_free={psram_free} \
-HTTP/1.0\r\nHost: {PROBE_IP}:{PROBE_PORT}\r\n\r\n"
-        );
-        stream.write_all(request.as_bytes()).await?;
-        let mut buf = [0u8; 256];
-        let received = stream.read(&mut buf).await?;
-        Ok::<bool, std::io::Error>(received > 0)
-    })
-    .await;
-    matches!(attempt, Ok(Ok(true)))
+    let mut lines: Vec<Vec<crate::watch_ui::OtaTextSpan<'_>>> = Vec::new();
+    lines.push(vec![span("My IP ", false), span(vpn_ip_str, true)]);
+    lines.push(vec![span(count_text, false)]);
+    lines.push(vec![]);
+    for node in nodes {
+        if node.online {
+            lines.push(vec![span(&node.hostname, true)]);
+        } else {
+            lines.push(vec![span(&node.hostname, false), span("offline", false)]);
+        }
+    }
+    lines
 }
 
-fn span(text: &str, accent: bool) -> crate::watch_ui::OtaTextSpan<'_> {
-    crate::watch_ui::OtaTextSpan { text, accent }
-}
-
-/// Snapshot of our VPN IP and the peer table (online peers first).
-fn collect_tailnet_info(
+/// Snapshot of our VPN IP, the "N devices:" line, and the peer table
+/// (online peers first).
+fn tailnet_snapshot(
     handle: &crate::microlink::MicrolinkGuard,
-) -> (String, i32, Vec<(String, bool)>) {
+) -> (String, String, Vec<crate::microlink::TailnetNode>) {
     let mut vpn_ip_buf = [0u8; 16];
     // SAFETY: valid handle and buffer of sufficient size.
     unsafe {
@@ -167,37 +158,10 @@ fn collect_tailnet_info(
         .unwrap_or_default();
 
     let nodes = crate::microlink::tailnet_nodes(handle);
-    let peers: Vec<(String, bool)> = nodes
-        .into_iter()
-        .map(|node| (node.hostname, node.online))
-        .collect();
-    (vpn_ip_str, peers.len() as i32, peers)
-}
-
-fn count_line(count: i32) -> String {
-    if count == 1 {
+    let count_text = if nodes.len() == 1 {
         "1 device:".to_string()
     } else {
-        format!("{count} devices:")
-    }
-}
-
-/// Page body: our IP, peer count, then names (online in the accent color).
-fn build_lines<'a>(
-    vpn_ip: &'a str,
-    count_line: &'a str,
-    peers: &'a [(String, bool)],
-) -> Vec<Vec<crate::watch_ui::OtaTextSpan<'a>>> {
-    let mut lines: Vec<Vec<crate::watch_ui::OtaTextSpan<'a>>> = Vec::new();
-    lines.push(vec![span("My IP ", false), span(vpn_ip, true)]);
-    lines.push(vec![span(count_line, false)]);
-    lines.push(vec![]);
-    for (name, online) in peers {
-        if *online {
-            lines.push(vec![span(name, true)]);
-        } else {
-            lines.push(vec![span(name, false), span("offline", false)]);
-        }
-    }
-    lines
+        format!("{} devices:", nodes.len())
+    };
+    (vpn_ip_str, count_text, nodes)
 }

@@ -3,10 +3,7 @@
 
 use esp_idf_svc::sys::microlink as ml;
 
-/// Tailscale auth key (tskey-auth-...). Required on the very first
-/// registration; afterwards the generated node keys are cached in NVS and
-/// the key can stay empty.
-pub(crate) const TAILSCALE_AUTH_KEY: &str = "tskey-auth-xxxx";
+/// Device name reported to the tailnet (kept for all microlink sessions).
 pub(crate) const DEVICE_NAME: &str = "vibewatch";
 
 /// Stops and frees the microlink instance whenever the session ends.
@@ -45,6 +42,29 @@ impl MicrolinkGuard {
         }
         // SAFETY: valid handle from microlink_init.
         unsafe { ml::microlink_trigger_handshake(self.0, vpn_ip) }
+    }
+
+    /// Moves our DERP mailbox to the home region of the peer owning `ip`:
+    /// microlink only delivers relayed packets through our own mailbox, so
+    /// talking to a peer in another region needs the mailbox next to it.
+    /// Returns the region we rehomed to, or None if the peer (or its home
+    /// region) is unknown.
+    pub(crate) fn rehome_to_peer(&self, ip: &str) -> Option<u16> {
+        let Ok(ip) = std::ffi::CString::new(ip) else {
+            return None;
+        };
+        // SAFETY: ip is a valid NUL-terminated string.
+        let vpn_ip = unsafe { ml::microlink_parse_ip(ip.as_ptr()) };
+        if vpn_ip == 0 {
+            return None;
+        }
+        // SAFETY: valid handle from microlink_init.
+        let region = unsafe { ml::microlink_get_peer_home_region(self.0, vpn_ip) };
+        if region == 0 {
+            return None;
+        }
+        unsafe { ml::microlink_rehome_derp(self.0, region) };
+        Some(region)
     }
 }
 
