@@ -681,6 +681,57 @@ where
     })
 }
 
+/// OTA download progress panel: title, a horizontal bar filled to
+/// `percent`, and the percentage under it. Redrawn wholesale per call (the
+/// OTA loop refreshes it in 5% steps).
+pub fn render_ota_progress<D>(target: &mut D, percent: u8) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Color>,
+{
+    let frame = target.bounding_box();
+    target.clear(Palette::BG)?;
+    let s = Scale::new(frame);
+    let panel = Rectangle::new(
+        Point::new(s.sx(20), s.sy(96)),
+        Size::new(s.sw(224), s.sh(136)),
+    );
+    round_rect(target, panel, s.sr(16), Palette::PANEL_2, None)?;
+    draw_label(
+        target,
+        "Updating",
+        Point::new(panel.center().x, panel.top_left.y + s.sh(44) as i32),
+        Palette::TEXT,
+        Alignment::Center,
+    )?;
+
+    let bar_rect = Rectangle::new(
+        Point::new(
+            panel.top_left.x + s.sw(20) as i32,
+            panel.top_left.y + s.sh(74) as i32,
+        ),
+        Size::new(panel.size.width.saturating_sub(s.sw(40)), s.sh(16).max(12)),
+    );
+    round_rect(target, bar_rect, s.sr(8), Palette::SURFACE_2, None)?;
+    let pct = percent.min(100);
+    let fill_w = bar_rect.size.width as u32 * pct as u32 / 100;
+    if fill_w > 0 {
+        let fill = Rectangle::new(bar_rect.top_left, Size::new(fill_w, bar_rect.size.height));
+        round_rect(target, fill, s.sr(8), Palette::AMBER, None)?;
+    }
+
+    let text = format!("{pct}%");
+    draw_label(
+        target,
+        &text,
+        Point::new(
+            panel.center().x,
+            bar_rect.top_left.y + bar_rect.size.height as i32 + s.sh(26) as i32,
+        ),
+        Palette::TEXT,
+        Alignment::Center,
+    )
+}
+
 pub fn render_session_list<D>(
     target: &mut D,
     data: &SessionListData<'_>,

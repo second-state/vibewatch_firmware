@@ -28,6 +28,30 @@ enum OtaEvent {
     DownloadLatest,
 }
 
+/// Sends `percent` (0-100) when it advanced by >= 5 since `last_sent`.
+/// `total` is the Content-Length reported at download start; without it no
+/// progress can be computed. Returns the new last-sent value.
+fn progress_step(
+    progress: &tokio::sync::mpsc::Sender<u8>,
+    last_sent: u8,
+    written: usize,
+    total: Option<usize>,
+) -> u8 {
+    let Some(total) = total else {
+        return last_sent;
+    };
+    if total == 0 {
+        return last_sent;
+    }
+    let percent = ((written.min(total) as u64 * 100) / total as u64) as u8;
+    if percent >= last_sent + 5 || percent < last_sent {
+        let _ = progress.blocking_send(percent.min(100));
+        percent
+    } else {
+        last_sent
+    }
+}
+
 pub async fn run(
     wifi: &mut crate::network::WifiManager,
     setting: &crate::setting::Setting,
@@ -54,8 +78,11 @@ pub async fn run(
     let (tx, rx) = std::sync::mpsc::channel::<OtaEvent>();
     let ui_tx = tx.clone();
     let _http_server = ota_http_server(tx)?;
+    // Download progress (percent) and failure notifications reach the UI
+    // loop through tokio channels; the worker thread uses blocking_send.
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<u8>(4);
+    let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::channel::<()>(1);
     // Worker reports back only on failure; a successful download reboots inside the worker.
-    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel::<()>();
     let _ota_worker = std::thread::Builder::new()
         .name("ota-worker".to_string())
         .stack_size(1024 * 16)
@@ -63,12 +90,12 @@ pub async fn run(
             while let Ok(ev) = rx.recv() {
                 let result = match ev {
                     OtaEvent::DataChunk(first) => ota_write_upload(&rx, first),
-                    OtaEvent::DownloadLatest => ota_download_latest(),
+                    OtaEvent::DownloadLatest => ota_download_latest(&progress_tx),
                     OtaEvent::Complete => continue,
                 };
                 if let Err(e) = result {
                     log::error!("OTA attempt failed: {e:?}");
-                    let _ = attempt_tx.send(());
+                    let _ = attempt_tx.blocking_send(());
                 }
             }
         })?;
@@ -95,38 +122,66 @@ pub async fn run(
     ];
     let button_label = "Update release";
     let mut hits = gui.display_ota_page(title, &lines, button_label).await?;
+    // Set once the download starts: while it runs, exit gestures are ignored
+    // (the worker owns the flash and reboots on success).
+    let mut downloading = false;
     loop {
-        match touch.next_gesture().await {
-            Some(crate::touch::TouchGesture::Click { start, end }) => {
-                if hits.back_hit_pair(start, end) {
-                    log::info!("OTA screen: back selected");
-                    return Ok(());
+        tokio::select! {
+            percent = progress_rx.recv() => {
+                let Some(percent) = percent else {
+                    return Err(anyhow::anyhow!("OTA worker exited"));
+                };
+                downloading = true;
+                gui.show_ota_progress(percent).await?;
+            }
+            failed = attempt_rx.recv() => {
+                if failed.is_none() {
+                    return Err(anyhow::anyhow!("OTA worker exited"));
                 }
-                if hits.button_hit_pair(start, end) {
-                    log::info!("OTA screen button selected: download latest");
-                    gui.show_status("OTA Mode", "Downloading latest...\nDevice will reboot")
-                        .await
-                        .ok();
-                    ui_tx.send(OtaEvent::DownloadLatest).map_err(|e| {
-                        log::error!("OTA channel closed: {:?}", e);
-                        anyhow::anyhow!("OTA channel closed: {:?}", e)
-                    })?;
-                    // Success never reaches here: the worker reboots the device.
-                    let _ = attempt_rx.recv();
-                    gui.show_status("OTA Mode", "Download failed").await.ok();
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                    hits = gui.display_ota_page(title, &lines, button_label).await?;
+                // A download attempt failed; success reboots inside the worker.
+                downloading = false;
+                gui.show_status("OTA Mode", "Download failed").await.ok();
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                hits = gui.display_ota_page(title, &lines, button_label).await?;
+            }
+            gesture = touch.next_gesture() => {
+                match gesture {
+                    Some(crate::touch::TouchGesture::Click { start, end }) => {
+                        if hits.back_hit_pair(start, end) {
+                            if downloading {
+                                log::info!("OTA screen: back ignored, download in progress");
+                                continue;
+                            }
+                            log::info!("OTA screen: back selected");
+                            return Ok(());
+                        }
+                        if hits.button_hit_pair(start, end) {
+                            log::info!("OTA screen button selected: download latest");
+                            gui.show_ota_progress(0).await?;
+                            ui_tx.send(OtaEvent::DownloadLatest).map_err(|e| {
+                                log::error!("OTA channel closed: {:?}", e);
+                                anyhow::anyhow!("OTA channel closed: {:?}", e)
+                            })?;
+                            // Progress arrives via progress_rx; failure via
+                            // attempt_rx. Success reboots inside the worker
+                            // and never returns here.
+                        }
+                    }
+                    Some(crate::touch::TouchGesture::Swipe {
+                        direction: crate::touch::SwipeDirection::Right,
+                        ..
+                    }) => {
+                        if downloading {
+                            log::info!("OTA screen: right swipe ignored, download in progress");
+                            continue;
+                        }
+                        log::info!("OTA screen: right swipe, going back to settings");
+                        return Ok(());
+                    }
+                    Some(_) => {}
+                    None => return Err(anyhow::anyhow!("touch event source closed")),
                 }
             }
-            Some(crate::touch::TouchGesture::Swipe {
-                direction: crate::touch::SwipeDirection::Right,
-                ..
-            }) => {
-                log::info!("OTA screen: right swipe, going back to settings");
-                return Ok(());
-            }
-            Some(_) => {}
-            None => return Err(anyhow::anyhow!("touch event source closed")),
         }
     }
 }
@@ -224,7 +279,7 @@ fn ota_write_upload(
     restart();
 }
 
-fn ota_download_latest() -> anyhow::Result<()> {
+fn ota_download_latest(progress: &tokio::sync::mpsc::Sender<u8>) -> anyhow::Result<()> {
     log::info!("OTA download latest from {}", OTA_DOWNLOAD_URL);
 
     const MAX_ATTEMPTS: usize = 10;
@@ -235,6 +290,7 @@ fn ota_download_latest() -> anyhow::Result<()> {
 
     let mut total: usize = 0;
     let mut full_len: Option<usize> = None;
+    let mut last_sent: u8 = 0;
     let mut buf = vec![0u8; 8192];
     let mut completed = false;
 
@@ -290,6 +346,7 @@ fn ota_download_latest() -> anyhow::Result<()> {
                 Ok(n) => {
                     update.write(&buf[..n])?;
                     total += n;
+                    last_sent = progress_step(progress, last_sent, total, full_len);
                     log::info!("OTA download chunk: {} bytes, total {}", n, total);
                 }
                 Err(e) => {

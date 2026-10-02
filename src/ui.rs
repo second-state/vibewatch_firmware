@@ -1100,6 +1100,12 @@ impl UI {
         self.flush_notice().await
     }
 
+    /// OTA download progress: panel with a bar, redrawn per call.
+    pub async fn show_ota_progress(&mut self, percent: u8) -> anyhow::Result<()> {
+        crate::watch_ui::render_ota_progress(self.display.as_mut(), percent)?;
+        self.flush_notice().await
+    }
+
     /// ASR text editor, adapted from vibekeys_firmware's black TUI-style editor.
     pub async fn show_asr_editor(&mut self, text: &str, hint: &str) -> anyhow::Result<()> {
         let state = match hint {
