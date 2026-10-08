@@ -25,6 +25,9 @@ pub(crate) fn stored_auth_key(nvs: &EspDefaultNvs) -> Option<String> {
     nvs.get_str(NVS_KEY, &mut buffer)
         .ok()?
         .filter(|key| !key.is_empty())
+        // A NUL would panic later at CString::new(...).unwrap() in
+        // start_and_wait; JSON "\u0000" escapes can smuggle one in.
+        .filter(|key| !key.bytes().any(|b| b == 0))
         .map(str::to_owned)
 }
 

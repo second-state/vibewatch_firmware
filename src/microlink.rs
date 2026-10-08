@@ -6,6 +6,45 @@ use esp_idf_svc::sys::microlink as ml;
 /// Device name reported to the tailnet (kept for all microlink sessions).
 pub(crate) const DEVICE_NAME: &str = "vibewatch";
 
+/// Quiets the microlink C component's per-tag logs down to WARN. At the
+/// default level ml_wg_mgr / ml_derp INFO lines (periodic probes, DERP
+/// SendPacket, handshake retries) repaint the serial console every few
+/// hundred milliseconds; WARN/ERROR are kept. Call after microlink start.
+pub(crate) fn quiet_logs() {
+    use esp_idf_svc::sys::{esp_log_level_get, esp_log_level_set, esp_log_level_t_ESP_LOG_WARN};
+    for tag in [
+        "ml_wg_mgr",
+        "ml_derp",
+        "ml_net_io",
+        "ml_coord",
+        "ml_h2",
+        "ml_stun",
+        "ml_cell",
+        "ml_at_sock",
+        "ml_config",
+        "ml_peer_nvs",
+        "ml_net_sw",
+        "ml_noise",
+        "ml_tcp",
+        "ml_udp",
+        "ml_zc",
+        "microlink",
+    ] {
+        // SAFETY: runtime log-level set/read only; the tag goes through
+        // CString because &str::as_ptr() is not NUL-terminated — an untermined
+        // tag silently never matches and the level stays at INFO.
+        let ctag = std::ffi::CString::new(tag).unwrap();
+        unsafe {
+            esp_log_level_set(ctag.as_ptr(), esp_log_level_t_ESP_LOG_WARN);
+            log::info!(
+                "ml log: {tag} level = {} (WARN = {})",
+                esp_log_level_get(ctag.as_ptr()),
+                esp_log_level_t_ESP_LOG_WARN
+            );
+        }
+    }
+}
+
 /// Stops and frees the microlink instance whenever the session ends.
 /// The CStrings keep `ml->config`'s `auth_key`/`device_name` pointers valid:
 /// `microlink_init` shallow-copies the config (pointers only), so the strings
@@ -95,8 +134,24 @@ pub(crate) async fn start_and_wait(
     timeout: std::time::Duration,
     gui: &mut crate::ui::UI,
 ) -> Option<MicrolinkGuard> {
-    let auth_key = std::ffi::CString::new(auth_key).unwrap();
-    let device_name = std::ffi::CString::new(device_name).unwrap();
+    // CString::new rejects interior NULs; fail the session instead of
+    // panicking (a provisioned key could theoretically carry one).
+    let auth_key = match std::ffi::CString::new(auth_key) {
+        Ok(key) => key,
+        Err(_) => {
+            gui.show_status(title, "Invalid auth key").await.ok();
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            return None;
+        }
+    };
+    let device_name = match std::ffi::CString::new(device_name) {
+        Ok(name) => name,
+        Err(_) => {
+            gui.show_status(title, "Invalid device name").await.ok();
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            return None;
+        }
+    };
     let config = ml::microlink_config_t {
         auth_key: auth_key.as_ptr(),
         device_name: device_name.as_ptr(),
@@ -128,6 +183,7 @@ pub(crate) async fn start_and_wait(
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         return None;
     }
+    quiet_logs();
 
     // Wait for registration, showing live state in the notice screen.
     let started = std::time::Instant::now();
